@@ -125,6 +125,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    BSP_LED_Toggle(LED_GREEN);
+    BSP_LED_Toggle(LED_BLUE);
+    BSP_LED_Toggle(LED_RED);
+    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
