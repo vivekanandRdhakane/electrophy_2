@@ -128,7 +128,8 @@ int main(void)
     BSP_LED_Toggle(LED_GREEN);
     BSP_LED_Toggle(LED_BLUE);
     BSP_LED_Toggle(LED_RED);
-    HAL_Delay(1000);
+    printf("Hello World!\n");
+    HAL_Delay(2000);
   }
   /* USER CODE END 3 */
 }
