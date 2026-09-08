@@ -64,20 +64,20 @@ static void MX_SPI1_Init(void);
 /* USER CODE BEGIN 0 */
 static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len)
 {
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_RESET);
   HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, &reg, 1, 1000);
   HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, (uint8_t*)bufp, len, 1000);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_SET);
   return 0;
 }
 
 static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len)
 {
-  reg |= 0x80; /* Read bit */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  reg |= 0x80; /* Read bit for LSM6DSV320X SPI */
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_RESET);
   HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, &reg, 1, 1000);
   HAL_SPI_Receive((SPI_HandleTypeDef*)handle, bufp, len, 1000);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_SET);
   return 0;
 }
 /* USER CODE END 0 */
@@ -140,28 +140,35 @@ int main(void)
   dev_ctx.mdelay = (void (*)(uint32_t))HAL_Delay;
   dev_ctx.handle = &hspi1;
 
-  /* Wait sensor boot time */
-  HAL_Delay(10);
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_RESET);
 
+  /* Wait sensor boot time */
+  HAL_Delay(100);
+/* Explicitly configure 4-wire SPI mode (SIM = 0 in IF_CFG register 0x03) */
+    lsm6dsv320x_spi_mode_set(&dev_ctx, LSM6DSV320X_SPI_4_WIRE);
   /* Check device ID */
   lsm6dsv320x_device_id_get(&dev_ctx, &whoamI);
   if (whoamI != LSM6DSV320X_ID) {
-    printf("LSM6DSV320X not found, WHO_AM_I = 0x%02x\r\n", whoamI);
-    //while (1);
+    printf("LSM6DSV320X not found! WHO_AM_I = 0x%02X (expected 0x%02X)\r\n", whoamI, LSM6DSV320X_ID);
+    printf("Please verify SPI wiring and that CS is connected to PA4.\r\n");
+  } else {
+    printf("LSM6DSV320X Found! WHO_AM_I = 0x%02X\r\n", whoamI);
+
+    /* Perform device power-on-reset */
+    lsm6dsv320x_sw_por(&dev_ctx);
+    HAL_Delay(15);
+
+    /* Enable Block Data Update */
+    lsm6dsv320x_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
+
+    /* Set Output Data Rate */
+    lsm6dsv320x_xl_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
+
+    /* Set full scale */
+    lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+
+    printf("LSM6DSV320X Accelerometer initialized successfully.\r\n");
   }
-  printf("LSM6DSV320X Found!\r\n");
-
-  /* Perform device power-on-reset */
-  lsm6dsv320x_sw_por(&dev_ctx);
-  HAL_Delay(10);
-
-  /* Enable Block Data Update */
-  lsm6dsv320x_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
-
-  /* Set Output Data Rate */
-  lsm6dsv320x_xl_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
-  /* Set full scale */
-  lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
 
   /* USER CODE END 2 */
 
@@ -175,11 +182,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    BSP_LED_Toggle(LED_GREEN);
-    BSP_LED_Toggle(LED_BLUE);
-    BSP_LED_Toggle(LED_RED);
-    printf("Hello World!\n");
-    HAL_Delay(2000);
     lsm6dsv320x_data_ready_t drdy;
     lsm6dsv320x_flag_data_ready_get(&dev_ctx, &drdy);
 
@@ -192,10 +194,13 @@ int main(void)
       acceleration_mg[1] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]);
       acceleration_mg[2] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]);
 
-      printf("Acceleration [mg]: %4.2f\t%4.2f\t%4.2f\r\n", acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
+      printf("Acceleration [mg]: X=%0.2f\tY=%0.2f\tZ=%0.2f\r\n",
+             acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
+      BSP_LED_Toggle(LED_GREEN);
+      HAL_Delay(100);
+    } else {
+      HAL_Delay(10);
     }
-
-    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
@@ -305,7 +310,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -342,7 +347,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
 
   /*Configure GPIO pin : PA4 */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
@@ -350,6 +354,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* Ensure CS (PA4) is HIGH (deselected) initially */
+  HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_RESET);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
