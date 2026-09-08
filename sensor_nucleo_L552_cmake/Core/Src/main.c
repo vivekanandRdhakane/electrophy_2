@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "lsm6dsv320x_reg.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -60,7 +62,24 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len)
+{
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, &reg, 1, 1000);
+  HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, (uint8_t*)bufp, len, 1000);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  return 0;
+}
 
+static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len)
+{
+  reg |= 0x80; /* Read bit */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_SPI_Transmit((SPI_HandleTypeDef*)handle, &reg, 1, 1000);
+  HAL_SPI_Receive((SPI_HandleTypeDef*)handle, bufp, len, 1000);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  return 0;
+}
 /* USER CODE END 0 */
 
 /**
@@ -95,9 +114,6 @@ int main(void)
   MX_ICACHE_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-
-  /* USER CODE END 2 */
-
   /* Initialize leds */
   BSP_LED_Init(LED_GREEN);
   BSP_LED_Init(LED_BLUE);
@@ -116,6 +132,40 @@ int main(void)
   {
     Error_Handler();
   }
+  stmdev_ctx_t dev_ctx;
+  uint8_t whoamI;
+
+  dev_ctx.write_reg = platform_write;
+  dev_ctx.read_reg = platform_read;
+  dev_ctx.mdelay = (void (*)(uint32_t))HAL_Delay;
+  dev_ctx.handle = &hspi1;
+
+  /* Wait sensor boot time */
+  HAL_Delay(10);
+
+  /* Check device ID */
+  lsm6dsv320x_device_id_get(&dev_ctx, &whoamI);
+  if (whoamI != LSM6DSV320X_ID) {
+    printf("LSM6DSV320X not found, WHO_AM_I = 0x%02x\r\n", whoamI);
+    //while (1);
+  }
+  printf("LSM6DSV320X Found!\r\n");
+
+  /* Perform device power-on-reset */
+  lsm6dsv320x_sw_por(&dev_ctx);
+  HAL_Delay(10);
+
+  /* Enable Block Data Update */
+  lsm6dsv320x_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
+
+  /* Set Output Data Rate */
+  lsm6dsv320x_xl_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
+  /* Set full scale */
+  lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+
+  /* USER CODE END 2 */
+
+  
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -130,6 +180,22 @@ int main(void)
     BSP_LED_Toggle(LED_RED);
     printf("Hello World!\n");
     HAL_Delay(2000);
+    lsm6dsv320x_data_ready_t drdy;
+    lsm6dsv320x_flag_data_ready_get(&dev_ctx, &drdy);
+
+    if (drdy.drdy_xl) {
+      int16_t data_raw_acceleration[3];
+      float acceleration_mg[3];
+      memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+      lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+      acceleration_mg[0] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[0]);
+      acceleration_mg[1] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]);
+      acceleration_mg[2] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]);
+
+      printf("Acceleration [mg]: %4.2f\t%4.2f\t%4.2f\r\n", acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
+    }
+
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
@@ -235,7 +301,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
@@ -273,7 +339,17 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
