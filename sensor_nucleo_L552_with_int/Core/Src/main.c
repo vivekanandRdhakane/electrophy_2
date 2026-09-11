@@ -49,6 +49,8 @@ SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
 float_t temp;
+/* Flag set by EXTI0 ISR when LSM6DSV320X INT1 asserts data ready */
+volatile uint8_t drdy_flag = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -178,13 +180,21 @@ int main(void)
     /* Enable Block Data Update */
     lsm6dsv320x_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
 
-    /* Set Output Data Rate */
+    /* Set Output Data Rate for accelerometer and gyroscope */
     lsm6dsv320x_xl_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
+    lsm6dsv320x_gy_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
 
     /* Set full scale */
     lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+    lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_2000dps);
 
-    printf("LSM6DSV320X Accelerometer initialized successfully.\r\n");
+    /* Route drdy_xl and drdy_g to INT1 pin so PB0 fires on every new sample */
+    lsm6dsv320x_pin_int_route_t pin_int = {0};
+    pin_int.drdy_xl = PROPERTY_ENABLE;
+    pin_int.drdy_g  = PROPERTY_ENABLE;
+    lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
+
+    printf("LSM6DSV320X Accelerometer + Gyroscope initialized (interrupt-driven via INT1/PB0).\r\n");
   }
   while (1)
   {
@@ -192,25 +202,38 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    lsm6dsv320x_data_ready_t drdy;
-    lsm6dsv320x_flag_data_ready_get(&dev_ctx, &drdy);
+    if (drdy_flag)
+    {
+      drdy_flag = 0;
 
-    if (drdy.drdy_xl) {
       int16_t data_raw_acceleration[3];
+      int16_t data_raw_angular_rate[3];
       float acceleration_mg[3];
+      float angular_rate_mdps[3];
+
       memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+      memset(data_raw_angular_rate, 0x00, 3 * sizeof(int16_t));
+
       lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+      lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
+
       acceleration_mg[0] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[0]);
       acceleration_mg[1] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]);
       acceleration_mg[2] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]);
-temp = acceleration_mg[2];
-      printf("Acceleration [mg]: X=%0.2f\tY=%0.2f\tZ=%0.2f\r\n",
-             acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
+
+      angular_rate_mdps[0] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[0]);
+      angular_rate_mdps[1] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[1]);
+      angular_rate_mdps[2] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[2]);
+
+      temp = acceleration_mg[2];
+
+      printf("%lu ms\t[mg] X=%0.2f\tY=%0.2f\tZ=%0.2f\t[mdps] X=%0.2f\tY=%0.2f\tZ=%0.2f\r\n",
+             (unsigned long)HAL_GetTick(),
+             acceleration_mg[0], acceleration_mg[1], acceleration_mg[2],
+             angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
       BSP_LED_Toggle(LED_GREEN);
-      HAL_Delay(100);
-    } else {
-      HAL_Delay(10);
     }
+    /* No HAL_Delay here — CPU is free; INT1 wakes us when data is ready */
   }
   /* USER CODE END 3 */
 }
@@ -357,7 +380,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA4 */
+  /*Configure GPIO pin : PA4 (SPI CS) */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -365,10 +388,19 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* Ensure CS (PA4) is HIGH (deselected) initially */
   HAL_GPIO_WritePin(CS_GPIO_PORT, CS_PIN, GPIO_PIN_RESET);
+
+  /*Configure PB0 as EXTI input for LSM6DSV320X INT1 (rising-edge triggered) */
+  GPIO_InitStruct.Pin = INT1_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(INT1_GPIO_PORT, &GPIO_InitStruct);
+
+  /* Enable and configure NVIC for EXTI0 (INT1) */
+  HAL_NVIC_SetPriority(INT1_EXTI_IRQn, 0, 1);
+  HAL_NVIC_EnableIRQ(INT1_EXTI_IRQn);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
