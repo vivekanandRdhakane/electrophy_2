@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../STMems_Standard_C_drivers"
+		},
+		{
+			"path": "esp_sensor"
 		}
 	],
 	"settings": {
