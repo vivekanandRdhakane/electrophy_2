@@ -13,6 +13,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
+import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,6 +47,7 @@ import kotlinx.coroutines.flow.update
 import java.io.File
 import java.util.UUID
 import java.util.Locale
+import java.util.Locale
 import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
 import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
 import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
@@ -58,6 +61,7 @@ import com.patrykandpatrick.vico.compose.m3.common.rememberM3VicoTheme
 import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
 import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
@@ -78,13 +82,67 @@ enum class GraphMode(val label: String, val command: String) {
 }
 
 private const val MAX_CHART_POINTS = 1500
+private const val MAX_CHART_POINTS = 1500
 
+data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
 data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
 
 data class ChartData(
     val lowG: List<AxisPoint> = emptyList(),
     val highG: List<AxisPoint> = emptyList(),
     val gyro: List<AxisPoint> = emptyList(),
+)
+
+data class OdrOption(val label: String, val suffix: String)
+
+data class TimeWindowOption(val label: String, val seconds: Float)
+
+val timeWindowOptions = listOf(
+    TimeWindowOption("1 sec", 1f),
+    TimeWindowOption("3 sec", 3f),
+    TimeWindowOption("5 sec", 5f),
+    TimeWindowOption("10 sec", 10f),
+    TimeWindowOption("30 sec", 30f),
+)
+
+val lowGOdrOptions = listOf(
+    OdrOption("Power-down", "off"),
+    OdrOption("1.875 Hz", "1hz875"),
+    OdrOption("7.5 Hz", "7hz5"),
+    OdrOption("15 Hz", "15hz"),
+    OdrOption("30 Hz", "30hz"),
+    OdrOption("60 Hz", "60hz"),
+    OdrOption("120 Hz", "120hz"),
+    OdrOption("240 Hz", "240hz"),
+    OdrOption("480 Hz", "480hz"),
+    OdrOption("960 Hz", "960hz"),
+    OdrOption("1920 Hz", "1920hz"),
+    OdrOption("3840 Hz", "3840hz"),
+    OdrOption("7680 Hz", "7680hz"),
+)
+
+val highGOdrOptions = listOf(
+    OdrOption("Power-down", "off"),
+    OdrOption("480 Hz", "480hz"),
+    OdrOption("960 Hz", "960hz"),
+    OdrOption("1920 Hz", "1920hz"),
+    OdrOption("3840 Hz", "3840hz"),
+    OdrOption("7680 Hz", "7680hz"),
+)
+
+val gyroOdrOptions = listOf(
+    OdrOption("Power-down", "off"),
+    OdrOption("7.5 Hz", "7hz5"),
+    OdrOption("15 Hz", "15hz"),
+    OdrOption("30 Hz", "30hz"),
+    OdrOption("60 Hz", "60hz"),
+    OdrOption("120 Hz", "120hz"),
+    OdrOption("240 Hz", "240hz"),
+    OdrOption("480 Hz", "480hz"),
+    OdrOption("960 Hz", "960hz"),
+    OdrOption("1920 Hz", "1920hz"),
+    OdrOption("3840 Hz", "3840hz"),
+    OdrOption("7680 Hz", "7680hz"),
 )
 
 data class OdrOption(val label: String, val suffix: String)
@@ -152,6 +210,14 @@ class BleViewModel : ViewModel() {
         lastAssignedTime = 0f
     }
 
+    private var sessionStartTimeMs = System.currentTimeMillis()
+    private var lastAssignedTime = 0f
+
+    private fun resetSession() {
+        sessionStartTimeMs = System.currentTimeMillis()
+        lastAssignedTime = 0f
+    }
+
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages
 
@@ -160,6 +226,46 @@ class BleViewModel : ViewModel() {
 
     private val _selectedMode = MutableStateFlow(GraphMode.LOW_G)
     val selectedMode: StateFlow<GraphMode> = _selectedMode
+
+    private val _lowGOdr = MutableStateFlow("15hz")
+    val lowGOdr: StateFlow<String> = _lowGOdr
+
+    private val _highGOdr = MutableStateFlow("480hz")
+    val highGOdr: StateFlow<String> = _highGOdr
+
+    private val _gyroOdr = MutableStateFlow("15hz")
+    val gyroOdr: StateFlow<String> = _gyroOdr
+
+    private val _timeWindowSec = MutableStateFlow(5f)
+    val timeWindowSec: StateFlow<Float> = _timeWindowSec
+
+    fun setTimeWindow(seconds: Float) {
+        _timeWindowSec.value = seconds
+    }
+
+    fun setLowGOdr(suffix: String) {
+        if (_lowGOdr.value == suffix) return
+        _lowGOdr.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("odr_low_g_$suffix")
+        }
+    }
+
+    fun setHighGOdr(suffix: String) {
+        if (_highGOdr.value == suffix) return
+        _highGOdr.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("odr_high_g_$suffix")
+        }
+    }
+
+    fun setGyroOdr(suffix: String) {
+        if (_gyroOdr.value == suffix) return
+        _gyroOdr.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("odr_gyro_$suffix")
+        }
+    }
 
     private val _lowGOdr = MutableStateFlow("15hz")
     val lowGOdr: StateFlow<String> = _lowGOdr
@@ -213,6 +319,7 @@ class BleViewModel : ViewModel() {
     private var scanner: BluetoothLeScanner? = null
     private var context: Context? = null
 
+
     private var logFile: File? = null
     private var pendingData = ""
 
@@ -265,6 +372,7 @@ class BleViewModel : ViewModel() {
                     }
                     _connectionState.value = ConnectionState.Connected
                     resetSession()
+                    resetSession()
                     sendCommand(_selectedMode.value.command + "\r\n")
                 } else {
                     disconnect()
@@ -303,6 +411,7 @@ class BleViewModel : ViewModel() {
 
         _connectionState.value = ConnectionState.Scanning
         scanner?.startScan(scanCallback)
+
 
         Handler(Looper.getMainLooper()).postDelayed({
             if (_connectionState.value == ConnectionState.Scanning) {
@@ -359,6 +468,7 @@ class BleViewModel : ViewModel() {
         if (_selectedMode.value == mode) return
         _selectedMode.value = mode
         resetSession()
+        resetSession()
         _chartData.value = ChartData()
         sendCommand(mode.command + "\r\n")
     }
@@ -399,8 +509,20 @@ class BleViewModel : ViewModel() {
         highG?.let { Log.d("BleDataPlot", "HighG time=$roundedTime s | X=${it.x}, Y=${it.y}, Z=${it.z}") }
         gyro?.let { Log.d("BleDataPlot", "Gyro time=$roundedTime s | X=${it.x}, Y=${it.y}, Z=${it.z}") }
 
+        val rawTimeSec = (System.currentTimeMillis() - sessionStartTimeMs) / 1000f
+        val currentTimeSec = if (rawTimeSec <= lastAssignedTime) lastAssignedTime + 0.02f else rawTimeSec
+        val roundedTime = (Math.round(currentTimeSec * 1000f) / 1000f).toFloat()
+        lastAssignedTime = roundedTime
+
+        lowG?.let { Log.d("BleDataPlot", "LowG time=$roundedTime s | X=${it.x}, Y=${it.y}, Z=${it.z}") }
+        highG?.let { Log.d("BleDataPlot", "HighG time=$roundedTime s | X=${it.x}, Y=${it.y}, Z=${it.z}") }
+        gyro?.let { Log.d("BleDataPlot", "Gyro time=$roundedTime s | X=${it.x}, Y=${it.y}, Z=${it.z}") }
+
         _chartData.update { current ->
             current.copy(
+                lowG = if (lowG != null) (current.lowG + lowG.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.lowG,
+                highG = if (highG != null) (current.highG + highG.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.highG,
+                gyro = if (gyro != null) (current.gyro + gyro.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.gyro,
                 lowG = if (lowG != null) (current.lowG + lowG.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.lowG,
                 highG = if (highG != null) (current.highG + highG.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.highG,
                 gyro = if (gyro != null) (current.gyro + gyro.copy(time = roundedTime)).takeLast(MAX_CHART_POINTS) else current.gyro,
@@ -411,6 +533,7 @@ class BleViewModel : ViewModel() {
     fun clearLogs() {
         _logMessages.value = emptyList()
         resetSession()
+        resetSession()
         pendingData = ""
     }
 
@@ -420,6 +543,7 @@ class BleViewModel : ViewModel() {
             shareFile(ctx)
         } else {
             logFile = File(ctx.cacheDir, "ESP_IMU_Log_${System.currentTimeMillis()}.txt")
+            logFile?.writeText("")
             logFile?.writeText("")
             _isRecording.value = true
         }
@@ -460,6 +584,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -475,6 +601,7 @@ class MainActivity : ComponentActivity() {
 fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val context = LocalContext.current
 
+
     LaunchedEffect(Unit) {
         viewModel.init(context)
     }
@@ -484,6 +611,11 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val isRecording by viewModel.isRecording.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val chartData by viewModel.chartData.collectAsState()
+    val lowGOdr by viewModel.lowGOdr.collectAsState()
+    val highGOdr by viewModel.highGOdr.collectAsState()
+    val gyroOdr by viewModel.gyroOdr.collectAsState()
+    val timeWindowSec by viewModel.timeWindowSec.collectAsState()
+    val isConnected = (connectionState == ConnectionState.Connected)
     val lowGOdr by viewModel.lowGOdr.collectAsState()
     val highGOdr by viewModel.highGOdr.collectAsState()
     val gyroOdr by viewModel.gyroOdr.collectAsState()
@@ -620,17 +752,20 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                             title = "Low-G Accelerometer (mg)",
                             points = chartData.lowG,
                             timeWindowSec = timeWindowSec,
+                            timeWindowSec = timeWindowSec,
                             modifier = Modifier.fillMaxSize(),
                         )
                         GraphMode.HIGH_G -> SensorChart(
                             title = "High-G Accelerometer (g)",
                             points = chartData.highG,
                             timeWindowSec = timeWindowSec,
+                            timeWindowSec = timeWindowSec,
                             modifier = Modifier.fillMaxSize(),
                         )
                         GraphMode.GYRO -> SensorChart(
                             title = "Gyroscope (mdps)",
                             points = chartData.gyro,
+                            timeWindowSec = timeWindowSec,
                             timeWindowSec = timeWindowSec,
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -639,13 +774,84 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                 title = "Low-G Accelerometer (mg)",
                                 points = chartData.lowG,
                                 timeWindowSec = timeWindowSec,
+                                timeWindowSec = timeWindowSec,
                                 modifier = Modifier.weight(1f),
                             )
                             SensorChart(
                                 title = "High-G Accelerometer (g)",
                                 points = chartData.highG,
                                 timeWindowSec = timeWindowSec,
+                                timeWindowSec = timeWindowSec,
                                 modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ODR & Time Window Section (Horizontal grid below plot)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Sampling Rate (ODR) & Time Window",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            OdrDropdown(
+                                title = "Low-G",
+                                options = lowGOdrOptions,
+                                selectedSuffix = lowGOdr,
+                                enabled = isConnected,
+                                onSelected = { viewModel.setLowGOdr(it) }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            OdrDropdown(
+                                title = "High-G",
+                                options = highGOdrOptions,
+                                selectedSuffix = highGOdr,
+                                enabled = isConnected,
+                                onSelected = { viewModel.setHighGOdr(it) }
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            OdrDropdown(
+                                title = "Gyro",
+                                options = gyroOdrOptions,
+                                selectedSuffix = gyroOdr,
+                                enabled = isConnected,
+                                onSelected = { viewModel.setGyroOdr(it) }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            TimeWindowDropdown(
+                                title = "Time Window",
+                                options = timeWindowOptions,
+                                selectedSeconds = timeWindowSec,
+                                onSelected = { viewModel.setTimeWindow(it) }
                             )
                         }
                     }
@@ -761,6 +967,7 @@ private fun SensorChart(
     title: String,
     points: List<AxisPoint>,
     timeWindowSec: Float,
+    timeWindowSec: Float,
     modifier: Modifier = Modifier,
 ) {
     val modelProducer = remember { CartesianChartModelProducer() }
@@ -777,6 +984,9 @@ private fun SensorChart(
         if (filteredPoints.isEmpty()) return@LaunchedEffect
         modelProducer.runTransaction {
             lineSeries {
+                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.x })
+                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.y })
+                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.z })
                 series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.x })
                 series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.y })
                 series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.z })
@@ -832,6 +1042,7 @@ private fun SensorChart(
                 .weight(1f),
             scrollState = rememberVicoScrollState(
                 scrollEnabled = false,
+                scrollEnabled = false,
             ),
         )
     }
@@ -851,6 +1062,109 @@ private fun LegendDot(color: Color, label: String) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OdrDropdown(
+    title: String,
+    options: List<OdrOption>,
+    selectedSuffix: String,
+    enabled: Boolean,
+    onSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedOption = options.find { it.suffix == selectedSuffix } ?: options.first()
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (enabled) expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = selectedOption.label,
+                onValueChange = {},
+                readOnly = true,
+                enabled = enabled,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = {
+                            onSelected(option.suffix)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimeWindowDropdown(
+    title: String,
+    options: List<TimeWindowOption>,
+    selectedSeconds: Float,
+    onSelected: (Float) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedOption = options.find { it.seconds == selectedSeconds } ?: options[2]
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = selectedOption.label,
+                onValueChange = {},
+                readOnly = true,
+                enabled = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = {
+                            onSelected(option.seconds)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
     }
 }
 
