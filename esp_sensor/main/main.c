@@ -80,6 +80,9 @@ static const char *TAG_BLE = "BLE";
 static spi_device_handle_t spi_handle;
 static TaskHandle_t        sensor_task_handle = NULL;
 
+/* Driver context — file-scope so BLE command handler can reconfigure ODR */
+static stmdev_ctx_t dev_ctx;
+
 /* BLE connection / subscription state */
 static uint16_t ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t imu_chr_val_handle = 0;
@@ -100,6 +103,60 @@ typedef enum {
 } stream_mode_t;
 
 static volatile stream_mode_t current_stream_mode = STREAM_MODE_ALL;
+
+/* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
+/* Current output data-rate (Hz) for each sensing path; 0 = power-down.
+ * Initialised to match the startup configuration below. */
+static volatile float g_xl_odr_hz  = 15.0f;   /* Low-G  accel  — CTRL1  */
+static volatile float g_gy_odr_hz  = 15.0f;   /* Gyro          — CTRL2  */
+static volatile float g_hg_odr_hz  = 480.0f;  /* High-G accel  — CTRL1_XL_HG */
+
+/* Derived timing — updated by odr_recompute_timing() after every ODR change.
+ * Send-interval: one BLE packet per cycle of the slowest active sensor.
+ * DRDY timeout : 5× the slowest period (floor 50 ms) so a missed INT1 pulse
+ *               doesn't stall the loop for more than one extra cycle. */
+static volatile int64_t g_send_interval_us = 66667LL;  /* 1/15 Hz ≈ 66 667 µs */
+static volatile uint32_t g_drdy_timeout_ms = 350;      /* 5 × 66.7 ms ≈ 333 ms */
+
+/**
+ * @brief Recompute g_send_interval_us and g_drdy_timeout_ms from current ODRs.
+ *
+ * Call this after changing any sensor ODR so the main loop self-adjusts.
+ * The send interval equals the period of the slowest ACTIVE sensor, clamped
+ * to at least 1 ms. The DRDY timeout is 5× that period, min 50 ms.
+ */
+static void odr_recompute_timing(void)
+{
+    /* Collect active (> 0 Hz) ODRs */
+    float min_hz = 0.0f;
+
+    if (g_xl_odr_hz > 0.0f) {
+        min_hz = (min_hz == 0.0f) ? g_xl_odr_hz : (g_xl_odr_hz < min_hz ? g_xl_odr_hz : min_hz);
+    }
+    if (g_gy_odr_hz > 0.0f) {
+        min_hz = (min_hz == 0.0f) ? g_gy_odr_hz : (g_gy_odr_hz < min_hz ? g_gy_odr_hz : min_hz);
+    }
+    if (g_hg_odr_hz > 0.0f) {
+        min_hz = (min_hz == 0.0f) ? g_hg_odr_hz : (g_hg_odr_hz < min_hz ? g_hg_odr_hz : min_hz);
+    }
+
+    if (min_hz <= 0.0f) {
+        /* All sensors off — fall back to 1 Hz so the loop is not completely frozen */
+        min_hz = 1.0f;
+    }
+
+    int64_t  period_us = (int64_t)(1e6f / min_hz);
+    uint32_t timeout_ms = (uint32_t)((5.0f * 1000.0f) / min_hz);
+
+    if (period_us  < 1000LL) period_us  = 1000LL;   /* floor 1 ms  */
+    if (timeout_ms < 50)     timeout_ms = 50;         /* floor 50 ms */
+
+    g_send_interval_us = period_us;
+    g_drdy_timeout_ms  = timeout_ms;
+
+    ESP_LOGI("ODR", "Timing updated: slowest ODR=%.3f Hz  send_interval=%lld µs  drdy_timeout=%lu ms",
+             min_hz, (long long)period_us, (unsigned long)timeout_ms);
+}
 
 /* ── INT1 ISR ─────────────────────────────────────────────────────────────── */
 static void IRAM_ATTR int1_isr_handler(void *arg)
@@ -248,6 +305,7 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 
         ESP_LOGI(TAG_BLE, "Received command: \"%s\"", cmd);
 
+        /* ── Stream-mode commands ──────────────────────────────────────── */
         if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
             current_stream_mode = STREAM_MODE_LOW_ACC;
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
@@ -263,8 +321,149 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
             current_stream_mode = STREAM_MODE_ALL;
             ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
+
+        /* ── Low-G accelerometer ODR commands (CTRL1 0x10) ────────────── */
+        /* odr_low_g_<rate>  — keeps current operating mode, changes ODR only */
+        } else if (strcasecmp(cmd, "odr_low_g_off") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 0.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR: power-down");
+        } else if (strcasecmp(cmd, "odr_low_g_1hz875") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1Hz875, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 1.875f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 1.875 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_7hz5") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 7.5f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 7.5 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_15hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 15.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 15 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_30hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 30.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 30 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_60hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 60.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 60 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_120hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 120.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 120 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_240hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 240.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 240 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_480hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 480.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 480 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_960hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 960.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 960 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_1920hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 1920.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 1920 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_3840hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 3840.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 3840 Hz");
+        } else if (strcasecmp(cmd, "odr_low_g_7680hz") == 0) {
+            lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            g_xl_odr_hz = 7680.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Low-G ODR set to 7680 Hz");
+
+
+        /* ── High-G accelerometer ODR commands (CTRL1_XL_HG 0x4E) ─────── */
+        /* odr_high_g_<rate>  — keeps reg_out_en = 1 */
+        } else if (strcasecmp(cmd, "odr_high_g_off") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_OFF, 0);
+            g_hg_odr_hz = 0.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR: power-down");
+        } else if (strcasecmp(cmd, "odr_high_g_480hz") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_480Hz, 1);
+            g_hg_odr_hz = 480.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR set to 480 Hz");
+        } else if (strcasecmp(cmd, "odr_high_g_960hz") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_960Hz, 1);
+            g_hg_odr_hz = 960.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR set to 960 Hz");
+        } else if (strcasecmp(cmd, "odr_high_g_1920hz") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_1920Hz, 1);
+            g_hg_odr_hz = 1920.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR set to 1920 Hz");
+        } else if (strcasecmp(cmd, "odr_high_g_3840hz") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_3840Hz, 1);
+            g_hg_odr_hz = 3840.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR set to 3840 Hz");
+        } else if (strcasecmp(cmd, "odr_high_g_7680hz") == 0) {
+            lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_7680Hz, 1);
+            g_hg_odr_hz = 7680.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "High-G ODR set to 7680 Hz");
+
+        /* ── Gyroscope ODR commands (CTRL2 0x11) ───────────────────────── */
+        /* odr_gyro_<rate>  — keeps current operating mode, changes ODR only */
+        } else if (strcasecmp(cmd, "odr_gyro_off") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 0.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR: power-down");
+        } else if (strcasecmp(cmd, "odr_gyro_7hz5") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 7.5f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 7.5 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_15hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 15.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 15 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_30hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 30.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 30 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_60hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 60.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 60 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_120hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 120.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 120 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_240hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 240.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 240 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_480hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 480.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 480 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_960hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 960.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 960 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_1920hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 1920.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 1920 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_3840hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 3840.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 3840 Hz");
+        } else if (strcasecmp(cmd, "odr_gyro_7680hz") == 0) {
+            lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            g_gy_odr_hz = 7680.0f; odr_recompute_timing();
+            ESP_LOGI(TAG_BLE, "Gyro ODR set to 7680 Hz");
+
         } else {
-            ESP_LOGW(TAG_BLE, "Unknown command \"%s\" (valid: 'low_acc', 'high_acc', 'both_acc', 'only_gyro', 'all')", cmd);
+            ESP_LOGW(TAG_BLE,
+                     "Unknown command \"%s\".\n"
+                     "  Stream:    low_acc | high_acc | both_acc | only_gyro | all\n"
+                     "  Low-G ODR: odr_low_g_{off|1hz875|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}\n"
+                     "  High-G ODR:odr_high_g_{off|480hz|960hz|1920hz|3840hz|7680hz}\n"
+                     "  Gyro ODR:  odr_gyro_{off|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}",
+                     cmd);
         }
         return 0;
     }
@@ -481,13 +680,11 @@ static void sensor_task(void *arg)
     cs_gpio_init();
     int1_gpio_init();
 
-    /* ── ST driver context ──────────────────────────────────────────────── */
-    stmdev_ctx_t dev_ctx = {
-        .write_reg = platform_write,
-        .read_reg  = platform_read,
-        .mdelay    = platform_delay,
-        .handle    = NULL,
-    };
+    /* ── ST driver context (global — shared with BLE command handler) ──── */
+    dev_ctx.write_reg = platform_write;
+    dev_ctx.read_reg  = platform_read;
+    dev_ctx.mdelay    = platform_delay;
+    dev_ctx.handle    = NULL;
 
     platform_delay(10);
 
@@ -562,9 +759,9 @@ static void sensor_task(void *arg)
             ESP_LOGI(TAG, "BLE connected — starting sensor data stream.");
         }
 
-        /* ── Wait for INT1 data-ready interrupt with 200ms timeout ───── */
-        /* If no interrupt arrives in 200ms (e.g. startup pulse missed), proceed anyway */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+        /* ── Wait for INT1 data-ready interrupt ───────────────────────── */
+        /* Timeout = 5× the period of the slowest active sensor (dynamic) */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(g_drdy_timeout_ms));
 
         memset(data_raw_acceleration, 0, sizeof(data_raw_acceleration));
         memset(data_raw_hg_acceleration, 0, sizeof(data_raw_hg_acceleration));
@@ -591,8 +788,8 @@ static void sensor_task(void *arg)
         static int64_t last_send_time = 0;
         int64_t now = esp_timer_get_time();
 
-        /* Send exactly 1 sample per second (1,000,000 microseconds) */
-        if (now - last_send_time >= 1000000LL) {
+        /* Send one packet per sensor cycle (interval = period of slowest active ODR) */
+        if (now - last_send_time >= g_send_interval_us) {
             last_send_time = now;
 
             /* Format according to active streaming mode */
