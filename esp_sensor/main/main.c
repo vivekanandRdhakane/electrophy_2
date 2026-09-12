@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -88,6 +89,17 @@ static uint8_t  own_addr_type      = BLE_OWN_ADDR_RANDOM; /* resolved at sync */
 /* FreeRTOS event group: set when a central is connected */
 #define BLE_CONNECTED_BIT   BIT0
 static EventGroupHandle_t ble_event_group;
+
+/* Streaming mode controlled by mobile commands */
+typedef enum {
+    STREAM_MODE_ALL = 0,     /* Low-G + High-G + Gyro */
+    STREAM_MODE_LOW_ACC,     /* Low-G Accelerometer only */
+    STREAM_MODE_HIGH_ACC,    /* High-G Accelerometer only */
+    STREAM_MODE_BOTH_ACC,    /* Both Low-G & High-G Accelerometers */
+    STREAM_MODE_ONLY_GYRO    /* Gyroscope only */
+} stream_mode_t;
+
+static volatile stream_mode_t current_stream_mode = STREAM_MODE_ALL;
 
 /* ── INT1 ISR ─────────────────────────────────────────────────────────────── */
 static void IRAM_ATTR int1_isr_handler(void *arg)
@@ -210,7 +222,7 @@ static void int1_gpio_init(void)
 }
 
 /* Cache of latest string for GATT Read */
-static char latest_ble_str[128] = "Sensor initializing...\r\n";
+static char latest_ble_str[256] = "Sensor initializing...\r\n";
 
 /* ── BLE: GATT characteristic access callback ─────────────────────────────── */
 static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -221,7 +233,39 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        /* Accept incoming text/commands from phone terminal */
+        char cmd[32] = {0};
+        uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+        if (len >= sizeof(cmd)) {
+            len = sizeof(cmd) - 1;
+        }
+        os_mbuf_copydata(ctxt->om, 0, len, cmd);
+        cmd[len] = '\0';
+
+        /* Strip trailing \r, \n, spaces */
+        while (len > 0 && (cmd[len - 1] == '\r' || cmd[len - 1] == '\n' || cmd[len - 1] == ' ')) {
+            cmd[--len] = '\0';
+        }
+
+        ESP_LOGI(TAG_BLE, "Received command: \"%s\"", cmd);
+
+        if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
+            current_stream_mode = STREAM_MODE_LOW_ACC;
+            ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
+        } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
+            current_stream_mode = STREAM_MODE_HIGH_ACC;
+            ESP_LOGI(TAG_BLE, "Switched stream mode: HIGH-G ACCELEROMETER ONLY");
+        } else if (strcasecmp(cmd, "both_acc") == 0 || strcasecmp(cmd, "acc") == 0) {
+            current_stream_mode = STREAM_MODE_BOTH_ACC;
+            ESP_LOGI(TAG_BLE, "Switched stream mode: BOTH ACCELEROMETERS (LOW-G + HIGH-G)");
+        } else if (strcasecmp(cmd, "only_gyro") == 0 || strcasecmp(cmd, "gyro") == 0) {
+            current_stream_mode = STREAM_MODE_ONLY_GYRO;
+            ESP_LOGI(TAG_BLE, "Switched stream mode: GYROSCOPE ONLY");
+        } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
+            current_stream_mode = STREAM_MODE_ALL;
+            ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
+        } else {
+            ESP_LOGW(TAG_BLE, "Unknown command \"%s\" (valid: 'low_acc', 'high_acc', 'both_acc', 'only_gyro', 'all')", cmd);
+        }
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -472,10 +516,17 @@ static void sensor_task(void *arg)
     /* Set Pulsed mode on DRDY pin so it pulses instead of latching indefinitely */
     lsm6dsv320x_data_ready_mode_set(&dev_ctx, LSM6DSV320X_DRDY_PULSED);
 
-    lsm6dsv320x_xl_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
-    lsm6dsv320x_gy_data_rate_set(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz);
+    /* 1. Low-G Accelerometer: 15 Hz, High-Performance, ±2g */
+    lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
     lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+
+    /* 2. Gyroscope: 15 Hz, High-Performance, ±2000dps */
+    lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
     lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_2000dps);
+
+    /* 3. High-G Accelerometer: 480 Hz ODR, enable output registers, ±320g */
+    lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_320g);
+    lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_480Hz, 1);
 
     /* Route DRDY_XL + DRDY_G to INT1 (GPIO10) */
     lsm6dsv320x_pin_int_route_t pin_int = {0};
@@ -483,14 +534,16 @@ static void sensor_task(void *arg)
     pin_int.drdy_g  = PROPERTY_ENABLE;
     lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
 
-    ESP_LOGI(TAG, "Sensor ready. Waiting for a BLE connection before streaming...");
+    ESP_LOGI(TAG, "Sensor ready (Low-G + High-G + Gyro). Waiting for BLE connection...");
 
     /* ── Main loop ──────────────────────────────────────────────────────── */
     int16_t data_raw_acceleration[3];
+    int16_t data_raw_hg_acceleration[3];
     int16_t data_raw_angular_rate[3];
     float   acceleration_mg[3];
+    float   hg_acceleration_g[3];
     float   angular_rate_mdps[3];
-    char    ble_str[128]; /* buffer for the ASCII notification string */
+    char    ble_str[256]; /* buffer for the ASCII notification string */
 
     while (1) {
         /* ── Gate: pause until a BLE central is connected ─────────────── */
@@ -503,6 +556,7 @@ static void sensor_task(void *arg)
                                 portMAX_DELAY);
             /* Perform a read to clear any pending/latched data on the sensor */
             lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+            lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
             lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
             ulTaskNotifyTake(pdTRUE, 0);
             ESP_LOGI(TAG, "BLE connected — starting sensor data stream.");
@@ -513,15 +567,23 @@ static void sensor_task(void *arg)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
 
         memset(data_raw_acceleration, 0, sizeof(data_raw_acceleration));
+        memset(data_raw_hg_acceleration, 0, sizeof(data_raw_hg_acceleration));
         memset(data_raw_angular_rate, 0, sizeof(data_raw_angular_rate));
 
+        /* Read Low-G Accelerometer (±2g) */
         lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-        lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
-
         acceleration_mg[0] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[0]);
         acceleration_mg[1] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]);
         acceleration_mg[2] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]);
 
+        /* Read High-G Accelerometer (±320g) */
+        lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
+        hg_acceleration_g[0] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[0]) / 1000.0f;
+        hg_acceleration_g[1] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[1]) / 1000.0f;
+        hg_acceleration_g[2] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[2]) / 1000.0f;
+
+        /* Read Gyroscope (±2000dps) */
+        lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
         angular_rate_mdps[0] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[0]);
         angular_rate_mdps[1] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[1]);
         angular_rate_mdps[2] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[2]);
@@ -533,12 +595,45 @@ static void sensor_task(void *arg)
         if (now - last_send_time >= 1000000LL) {
             last_send_time = now;
 
-            /* Format: identical to the serial log with CRLF for terminals */
-            snprintf(ble_str, sizeof(ble_str),
-                     "[mg] X=%7.2f Y=%7.2f Z=%7.2f  "
-                     "[mdps] X=%8.2f Y=%8.2f Z=%8.2f\r\n",
-                     acceleration_mg[0],   acceleration_mg[1],   acceleration_mg[2],
-                     angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
+            /* Format according to active streaming mode */
+            switch (current_stream_mode) {
+            case STREAM_MODE_LOW_ACC:
+                snprintf(ble_str, sizeof(ble_str),
+                         "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f\r\n",
+                         acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
+                break;
+
+            case STREAM_MODE_HIGH_ACC:
+                snprintf(ble_str, sizeof(ble_str),
+                         "[High-G g] X=%6.2f Y=%6.2f Z=%6.2f\r\n",
+                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2]);
+                break;
+
+            case STREAM_MODE_BOTH_ACC:
+                snprintf(ble_str, sizeof(ble_str),
+                         "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  "
+                         "[HG g] X=%6.2f Y=%6.2f Z=%6.2f\r\n",
+                         acceleration_mg[0], acceleration_mg[1], acceleration_mg[2],
+                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2]);
+                break;
+
+            case STREAM_MODE_ONLY_GYRO:
+                snprintf(ble_str, sizeof(ble_str),
+                         "[mdps] X=%8.2f Y=%8.2f Z=%8.2f\r\n",
+                         angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
+                break;
+
+            case STREAM_MODE_ALL:
+            default:
+                snprintf(ble_str, sizeof(ble_str),
+                         "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  "
+                         "[HG g] X=%6.2f Y=%6.2f Z=%6.2f  "
+                         "[mdps] X=%8.2f Y=%8.2f Z=%8.2f\r\n",
+                         acceleration_mg[0],   acceleration_mg[1],   acceleration_mg[2],
+                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2],
+                         angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
+                break;
+            }
 
             /* Update cache for GATT Read */
             strncpy(latest_ble_str, ble_str, sizeof(latest_ble_str) - 1);
