@@ -18,11 +18,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -38,6 +42,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
 import java.util.UUID
+import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
+import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
+import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
+import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
+import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
+import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
+import com.patrykandpatrick.vico.compose.cartesian.rememberVicoScrollState
+import com.patrykandpatrick.vico.compose.common.ProvideVicoTheme
+import com.patrykandpatrick.vico.compose.common.fill
+import com.patrykandpatrick.vico.compose.m3.common.rememberM3VicoTheme
+import com.patrykandpatrick.vico.core.cartesian.AutoScrollCondition
+import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
+import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
+import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
+import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
 
 // UUIDs
 val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -46,6 +66,23 @@ val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
 enum class ConnectionState { Disconnected, Scanning, Connecting, Connected }
+
+enum class GraphMode(val label: String, val command: String) {
+    LOW_G("Low-G Accel", "low_acc"),
+    HIGH_G("High-G Accel", "high_acc"),
+    BOTH_ACC("Both Accel", "both_acc"),
+    GYRO("Gyro", "only_gyro"),
+}
+
+private const val MAX_CHART_POINTS = 50
+
+data class AxisPoint(val x: Float, val y: Float, val z: Float)
+
+data class ChartData(
+    val lowG: List<AxisPoint> = emptyList(),
+    val highG: List<AxisPoint> = emptyList(),
+    val gyro: List<AxisPoint> = emptyList(),
+)
 
 @SuppressLint("MissingPermission")
 class BleViewModel : ViewModel() {
@@ -57,6 +94,16 @@ class BleViewModel : ViewModel() {
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording
+
+    private val _selectedMode = MutableStateFlow(GraphMode.LOW_G)
+    val selectedMode: StateFlow<GraphMode> = _selectedMode
+
+    private val _chartData = MutableStateFlow(ChartData())
+    val chartData: StateFlow<ChartData> = _chartData
+
+    private val xyzRegex = Regex(
+        """X\s*=\s*(-?\d+(?:\.\d+)?)\s+Y\s*=\s*(-?\d+(?:\.\d+)?)\s+Z\s*=\s*(-?\d+(?:\.\d+)?)"""
+    )
 
     private var bluetoothGatt: BluetoothGatt? = null
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
@@ -115,6 +162,7 @@ class BleViewModel : ViewModel() {
                         }
                     }
                     _connectionState.value = ConnectionState.Connected
+                    sendCommand(_selectedMode.value.command + "\r\n")
                 } else {
                     disconnect()
                 }
@@ -184,7 +232,9 @@ class BleViewModel : ViewModel() {
             val lines = pendingData.split("\n")
             pendingData = lines.last()
             val completeLines = lines.dropLast(1)
-            
+
+            completeLines.forEach { line -> processIncomingLine(line) }
+
             _logMessages.update { current ->
                 val updated = current.toMutableList()
                 updated.addAll(completeLines)
@@ -200,6 +250,49 @@ class BleViewModel : ViewModel() {
                     file.appendText(textToAppend)
                 }
             }
+        }
+    }
+
+    fun selectMode(mode: GraphMode) {
+        if (_selectedMode.value == mode) return
+        _selectedMode.value = mode
+        _chartData.value = ChartData()
+        sendCommand(mode.command + "\r\n")
+    }
+
+    private fun processIncomingLine(rawLine: String) {
+        val line = rawLine.trim()
+        if (line.isEmpty()) return
+
+        val points = parseXyzPoints(line)
+        when (_selectedMode.value) {
+            GraphMode.LOW_G -> if (points.isNotEmpty()) appendPoints(lowG = points.first())
+            GraphMode.HIGH_G -> if (points.isNotEmpty()) appendPoints(highG = points.first())
+            GraphMode.GYRO -> if (points.isNotEmpty()) appendPoints(gyro = points.first())
+            GraphMode.BOTH_ACC -> if (points.size >= 2) appendPoints(lowG = points[0], highG = points[1])
+        }
+    }
+
+    private fun parseXyzPoints(line: String): List<AxisPoint> =
+        xyzRegex.findAll(line).mapNotNull { match ->
+            try {
+                AxisPoint(
+                    x = match.groupValues[1].toFloat(),
+                    y = match.groupValues[2].toFloat(),
+                    z = match.groupValues[3].toFloat(),
+                )
+            } catch (e: NumberFormatException) {
+                null
+            }
+        }.toList()
+
+    private fun appendPoints(lowG: AxisPoint? = null, highG: AxisPoint? = null, gyro: AxisPoint? = null) {
+        _chartData.update { current ->
+            current.copy(
+                lowG = if (lowG != null) (current.lowG + lowG).takeLast(MAX_CHART_POINTS) else current.lowG,
+                highG = if (highG != null) (current.highG + highG).takeLast(MAX_CHART_POINTS) else current.highG,
+                gyro = if (gyro != null) (current.gyro + gyro).takeLast(MAX_CHART_POINTS) else current.gyro,
+            )
         }
     }
 
@@ -276,6 +369,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val connectionState by viewModel.connectionState.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+    val selectedMode by viewModel.selectedMode.collectAsState()
+    val chartData by viewModel.chartData.collectAsState()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -376,7 +471,65 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 }
             }
 
-            // Middle Section: Console
+            // Graph mode selector
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GraphMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = selectedMode == mode,
+                        onClick = { viewModel.selectMode(mode) },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+
+            // Real-time chart
+            Box(
+                modifier = Modifier
+                    .weight(1.1f)
+                    .fillMaxWidth()
+                    .padding(8.dp)
+                    .background(Color(0xFF101418))
+            ) {
+                ProvideVicoTheme(rememberM3VicoTheme()) {
+                    when (selectedMode) {
+                        GraphMode.LOW_G -> SensorChart(
+                            title = "Low-G Accelerometer (mg)",
+                            points = chartData.lowG,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        GraphMode.HIGH_G -> SensorChart(
+                            title = "High-G Accelerometer (g)",
+                            points = chartData.highG,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        GraphMode.GYRO -> SensorChart(
+                            title = "Gyroscope (mdps)",
+                            points = chartData.gyro,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        GraphMode.BOTH_ACC -> Column(modifier = Modifier.fillMaxSize()) {
+                            SensorChart(
+                                title = "Low-G Accelerometer (mg)",
+                                points = chartData.lowG,
+                                modifier = Modifier.weight(1f),
+                            )
+                            SensorChart(
+                                title = "High-G Accelerometer (g)",
+                                points = chartData.highG,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Console
             val listState = rememberLazyListState()
             LaunchedEffect(logMessages.size) {
                 if (logMessages.isNotEmpty()) {
@@ -386,7 +539,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
 
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .weight(0.9f)
                     .fillMaxWidth()
                     .padding(8.dp)
                     .background(Color.Black)
@@ -407,35 +560,91 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                     }
                 }
             }
+        }
+    }
+}
 
-            // Bottom Bar: Commands
-            Text("Commands", modifier = Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelMedium)
-            
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                val commands = listOf(
-                    "Low-G" to "low_acc\r\n",
-                    "High-G" to "high_acc\r\n",
-                    "Both Acc" to "both_acc\r\n",
-                    "Gyro" to "only_gyro\r\n",
-                    "All" to "all\r\n"
-                )
+@Composable
+private fun SensorChart(
+    title: String,
+    points: List<AxisPoint>,
+    modifier: Modifier = Modifier,
+) {
+    val modelProducer = remember { CartesianChartModelProducer() }
 
-                commands.forEach { (label, cmd) ->
-                    Button(
-                        onClick = { viewModel.sendCommand(cmd) },
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                        modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
-                        enabled = connectionState == ConnectionState.Connected
-                    ) {
-                        Text(label, fontSize = 10.sp, maxLines = 1)
-                    }
-                }
+    LaunchedEffect(points) {
+        if (points.isEmpty()) return@LaunchedEffect
+        modelProducer.runTransaction {
+            lineSeries {
+                series(y = points.map { it.x })
+                series(y = points.map { it.y })
+                series(y = points.map { it.z })
             }
         }
+    }
+
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                LegendDot(Color.Red, "X")
+                LegendDot(Color.Green, "Y")
+                LegendDot(Color.Blue, "Z")
+            }
+        }
+
+        CartesianChartHost(
+            chart = rememberCartesianChart(
+                rememberLineCartesianLayer(
+                    LineCartesianLayer.LineProvider.series(
+                        LineCartesianLayer.rememberLine(
+                            fill = LineCartesianLayer.LineFill.single(fill(Color.Red)),
+                        ),
+                        LineCartesianLayer.rememberLine(
+                            fill = LineCartesianLayer.LineFill.single(fill(Color.Green)),
+                        ),
+                        LineCartesianLayer.rememberLine(
+                            fill = LineCartesianLayer.LineFill.single(fill(Color.Blue)),
+                        ),
+                    ),
+                ),
+                startAxis = VerticalAxis.rememberStart(),
+                bottomAxis = HorizontalAxis.rememberBottom(),
+            ),
+            modelProducer = modelProducer,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            scrollState = rememberVicoScrollState(
+                autoScrollCondition = AutoScrollCondition.OnModelGrowth,
+            ),
+        )
+    }
+}
+
+@Composable
+private fun LegendDot(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color, CircleShape),
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
     }
 }

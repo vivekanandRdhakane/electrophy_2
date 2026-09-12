@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "esp_sensor"
+		},
+		{
+			"path": "Electrophy_app"
 		}
 	],
 	"settings": {

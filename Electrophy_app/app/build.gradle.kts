@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "com.example.electrophy_app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.electrophy_app"
@@ -58,6 +58,8 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.material)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.vico.compose)
+    implementation(libs.vico.compose.m3)
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
