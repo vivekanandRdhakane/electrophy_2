@@ -45,22 +45,14 @@ import kotlinx.coroutines.flow.update
 import java.io.File
 import java.util.UUID
 import java.util.Locale
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
-import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.compose.cartesian.rememberVicoScrollState
-import com.patrykandpatrick.vico.compose.common.ProvideVicoTheme
-import com.patrykandpatrick.vico.compose.common.fill
-import com.patrykandpatrick.vico.compose.m3.common.rememberM3VicoTheme
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
-import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
-import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
-import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
-import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
+import android.view.ViewGroup
+import androidx.compose.ui.viewinterop.AndroidView
+import com.github.mikephil.charting.charts.LineChart
+import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.data.Entry
+import com.github.mikephil.charting.data.LineData
+import com.github.mikephil.charting.data.LineDataSet
+import com.github.mikephil.charting.formatter.ValueFormatter
 
 // UUIDs
 val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -379,11 +371,12 @@ class BleViewModel : ViewModel() {
     private fun parseXyzPoints(line: String): List<AxisPoint> =
         xyzRegex.findAll(line).mapNotNull { match ->
             try {
-                AxisPoint(
-                    x = match.groupValues[1].toFloat(),
-                    y = match.groupValues[2].toFloat(),
-                    z = match.groupValues[3].toFloat(),
-                )
+                val x = match.groupValues[1].toFloat()
+                val y = match.groupValues[2].toFloat()
+                val z = match.groupValues[3].toFloat()
+                // Ignore spurious all-zero startup or command echo packets
+                if (x == 0f && y == 0f && z == 0f) return@mapNotNull null
+                AxisPoint(x = x, y = y, z = z)
             } catch (e: NumberFormatException) {
                 null
             }
@@ -614,40 +607,38 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                     .padding(8.dp)
                     .background(Color(0xFF101418))
             ) {
-                ProvideVicoTheme(rememberM3VicoTheme()) {
-                    when (selectedMode) {
-                        GraphMode.LOW_G -> SensorChart(
+                when (selectedMode) {
+                    GraphMode.LOW_G -> SensorChart(
+                        title = "Low-G Accelerometer (mg)",
+                        points = chartData.lowG,
+                        timeWindowSec = timeWindowSec,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    GraphMode.HIGH_G -> SensorChart(
+                        title = "High-G Accelerometer (g)",
+                        points = chartData.highG,
+                        timeWindowSec = timeWindowSec,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    GraphMode.GYRO -> SensorChart(
+                        title = "Gyroscope (mdps)",
+                        points = chartData.gyro,
+                        timeWindowSec = timeWindowSec,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    GraphMode.BOTH_ACC -> Column(modifier = Modifier.fillMaxSize()) {
+                        SensorChart(
                             title = "Low-G Accelerometer (mg)",
                             points = chartData.lowG,
                             timeWindowSec = timeWindowSec,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.weight(1f),
                         )
-                        GraphMode.HIGH_G -> SensorChart(
+                        SensorChart(
                             title = "High-G Accelerometer (g)",
                             points = chartData.highG,
                             timeWindowSec = timeWindowSec,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.weight(1f),
                         )
-                        GraphMode.GYRO -> SensorChart(
-                            title = "Gyroscope (mdps)",
-                            points = chartData.gyro,
-                            timeWindowSec = timeWindowSec,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                        GraphMode.BOTH_ACC -> Column(modifier = Modifier.fillMaxSize()) {
-                            SensorChart(
-                                title = "Low-G Accelerometer (mg)",
-                                points = chartData.lowG,
-                                timeWindowSec = timeWindowSec,
-                                modifier = Modifier.weight(1f),
-                            )
-                            SensorChart(
-                                title = "High-G Accelerometer (g)",
-                                points = chartData.highG,
-                                timeWindowSec = timeWindowSec,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
                     }
                 }
             }
@@ -682,7 +673,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                 title = "Low-G",
                                 options = lowGOdrOptions,
                                 selectedSuffix = lowGOdr,
-                                enabled = isConnected,
+                                enabled = true,
                                 onSelected = { viewModel.setLowGOdr(it) }
                             )
                         }
@@ -691,7 +682,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                 title = "High-G",
                                 options = highGOdrOptions,
                                 selectedSuffix = highGOdr,
-                                enabled = isConnected,
+                                enabled = true,
                                 onSelected = { viewModel.setHighGOdr(it) }
                             )
                         }
@@ -705,7 +696,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                 title = "Gyro",
                                 options = gyroOdrOptions,
                                 selectedSuffix = gyroOdr,
-                                enabled = isConnected,
+                                enabled = true,
                                 onSelected = { viewModel.setGyroOdr(it) }
                             )
                         }
@@ -763,28 +754,6 @@ private fun SensorChart(
     timeWindowSec: Float,
     modifier: Modifier = Modifier,
 ) {
-    val modelProducer = remember { CartesianChartModelProducer() }
-
-    val filteredPoints = remember(points, timeWindowSec) {
-        if (points.isEmpty()) emptyList()
-        else {
-            val maxTime = points.last().time
-            val windowMs = timeWindowSec * 1000f
-            points.filter { it.time >= maxTime - windowMs }
-        }
-    }
-
-    LaunchedEffect(filteredPoints) {
-        if (filteredPoints.isEmpty()) return@LaunchedEffect
-        modelProducer.runTransaction {
-            lineSeries {
-                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.x })
-                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.y })
-                series(x = filteredPoints.map { it.time }, y = filteredPoints.map { it.z })
-            }
-        }
-    }
-
     Column(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -805,36 +774,79 @@ private fun SensorChart(
             }
         }
 
-        CartesianChartHost(
-            chart = rememberCartesianChart(
-                rememberLineCartesianLayer(
-                    LineCartesianLayer.LineProvider.series(
-                        LineCartesianLayer.rememberLine(
-                            fill = LineCartesianLayer.LineFill.single(fill(Color.Red)),
-                        ),
-                        LineCartesianLayer.rememberLine(
-                            fill = LineCartesianLayer.LineFill.single(fill(Color.Green)),
-                        ),
-                        LineCartesianLayer.rememberLine(
-                            fill = LineCartesianLayer.LineFill.single(fill(Color.Blue)),
-                        ),
-                    ),
-                ),
-                startAxis = VerticalAxis.rememberStart(),
-                bottomAxis = HorizontalAxis.rememberBottom(
-                    valueFormatter = CartesianValueFormatter { _, value, _ ->
-                        val seconds = (value as Number).toFloat() / 1000f
-                        String.format(Locale.US, "%.1fs", seconds)
+        AndroidView(
+            factory = { ctx ->
+                LineChart(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    description.isEnabled = false
+                    setTouchEnabled(true)
+                    isDragEnabled = false
+                    setScaleEnabled(false)
+                    setPinchZoom(false)
+                    setBackgroundColor(android.graphics.Color.parseColor("#101418"))
+                    
+                    xAxis.apply {
+                        textColor = android.graphics.Color.WHITE
+                        position = XAxis.XAxisPosition.BOTTOM
+                        setDrawGridLines(true)
+                        gridColor = android.graphics.Color.parseColor("#333333")
+                        valueFormatter = object : ValueFormatter() {
+                            override fun getFormattedValue(value: Float): String {
+                                return String.format(Locale.US, "%.1fs", value / 1000f)
+                            }
+                        }
                     }
-                ),
-            ),
-            modelProducer = modelProducer,
+                    axisLeft.apply {
+                        textColor = android.graphics.Color.WHITE
+                        setDrawGridLines(true)
+                        gridColor = android.graphics.Color.parseColor("#333333")
+                    }
+                    axisRight.isEnabled = false
+                    legend.isEnabled = false
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            scrollState = rememberVicoScrollState(
-                scrollEnabled = false,
-            ),
+            update = { chart ->
+                val maxTime = if (points.isNotEmpty()) points.last().time else 0f
+                val windowMs = timeWindowSec * 1000f
+                val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
+
+                val pointsString = filtered.joinToString(prefix = "[", postfix = "]") { "(${it.time}ms: x=${it.x}, y=${it.y}, z=${it.z})" }
+                Log.d("SensorChartBuffer", "[$title] Plotting ${filtered.size} points: $pointsString")
+
+                val entriesX = filtered.map { Entry(it.time, it.x) }
+                val entriesY = filtered.map { Entry(it.time, it.y) }
+                val entriesZ = filtered.map { Entry(it.time, it.z) }
+
+                val setX = LineDataSet(entriesX, "X").apply {
+                    color = android.graphics.Color.RED
+                    setDrawCircles(false)
+                    lineWidth = 2f
+                    setDrawValues(false)
+                }
+                val setY = LineDataSet(entriesY, "Y").apply {
+                    color = android.graphics.Color.GREEN
+                    setDrawCircles(false)
+                    lineWidth = 2f
+                    setDrawValues(false)
+                }
+                val setZ = LineDataSet(entriesZ, "Z").apply {
+                    color = android.graphics.Color.BLUE
+                    setDrawCircles(false)
+                    lineWidth = 2f
+                    setDrawValues(false)
+                }
+
+                val data = LineData(setX, setY, setZ)
+                chart.data = data
+                chart.notifyDataSetChanged()
+                chart.invalidate()
+            }
         )
     }
 }

@@ -58,8 +58,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.material)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.vico.compose)
-    implementation(libs.vico.compose.m3)
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
