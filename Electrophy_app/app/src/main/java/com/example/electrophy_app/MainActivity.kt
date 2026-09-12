@@ -19,6 +19,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,6 +38,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,6 +54,7 @@ import java.io.File
 import java.util.UUID
 import java.util.Locale
 import android.view.ViewGroup
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.XAxis
@@ -873,12 +882,12 @@ private fun OdrDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selectedOption = options.find { it.suffix == selectedSuffix } ?: options.first()
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(bottom = 2.dp)
+            modifier = Modifier.padding(bottom = 1.dp)
         )
         ExposedDropdownMenuBox(
             expanded = expanded,
@@ -889,11 +898,25 @@ private fun OdrDropdown(
                 onValueChange = {},
                 readOnly = true,
                 enabled = enabled,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
+                ),
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
+                    .height(48.dp)
+                    .pointerInput(enabled) {
+                        detectTapGestures(
+                            onTap = {
+                                if (enabled) {
+                                    expanded = !expanded
+                                }
+                            }
+                        )
+                    },
+                singleLine = true
             )
             ExposedDropdownMenu(
                 expanded = expanded,
@@ -924,12 +947,12 @@ private fun TimeWindowDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selectedOption = options.find { it.seconds == selectedSeconds } ?: options[2]
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(bottom = 2.dp)
+            modifier = Modifier.padding(bottom = 1.dp)
         )
         ExposedDropdownMenuBox(
             expanded = expanded,
@@ -940,11 +963,21 @@ private fun TimeWindowDropdown(
                 onValueChange = {},
                 readOnly = true,
                 enabled = true,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                colors = OutlinedTextFieldDefaults.colors(),
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
+                    .height(48.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                expanded = !expanded
+                            }
+                        )
+                    },
+                singleLine = true
             )
             ExposedDropdownMenu(
                 expanded = expanded,
