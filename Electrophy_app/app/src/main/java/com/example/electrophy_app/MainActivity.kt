@@ -388,10 +388,6 @@ class BleViewModel : ViewModel() {
         lastAssignedTimeMs = timeMs
         val timeFloat = timeMs.toFloat()
 
-        lowG?.let { Log.d("BleDataPlot", "LowG time=${timeFloat}ms | X=${it.x}, Y=${it.y}, Z=${it.z}") }
-        highG?.let { Log.d("BleDataPlot", "HighG time=${timeFloat}ms | X=${it.x}, Y=${it.y}, Z=${it.z}") }
-        gyro?.let { Log.d("BleDataPlot", "Gyro time=${timeFloat}ms | X=${it.x}, Y=${it.y}, Z=${it.z}") }
-
         _chartData.update { current ->
             current.copy(
                 lowG = if (lowG != null) (current.lowG + lowG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.lowG,
@@ -815,9 +811,6 @@ private fun SensorChart(
                 val maxTime = if (points.isNotEmpty()) points.last().time else 0f
                 val windowMs = timeWindowSec * 1000f
                 val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
-
-                val pointsString = filtered.joinToString(prefix = "[", postfix = "]") { "(${it.time}ms: x=${it.x}, y=${it.y}, z=${it.z})" }
-                Log.d("SensorChartBuffer", "[$title] Plotting ${filtered.size} points: $pointsString")
 
                 val entriesX = filtered.map { Entry(it.time, it.x) }
                 val entriesY = filtered.map { Entry(it.time, it.y) }
