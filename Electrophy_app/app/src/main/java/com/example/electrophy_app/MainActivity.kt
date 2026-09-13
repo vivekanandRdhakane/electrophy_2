@@ -433,8 +433,7 @@ class BleViewModel : ViewModel() {
     fun selectMode(mode: GraphMode) {
         if (_selectedMode.value == mode) return
         _selectedMode.value = mode
-        resetSession()
-        _chartData.value = ChartData()
+        clearLogs()
         sendCommand(mode.command + "\r\n")
     }
 
