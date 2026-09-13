@@ -6,8 +6,10 @@ CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 CONFIG_BT_CONTROLLER_ENABLED=y
-# Increase ATT MTU so multi-channel ASCII string fits in one notification packet
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
+# 517-byte ATT MTU permits 512-byte binary payloads (84 Low-G samples/notify).
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
+# Keep enough packet buffers for several asynchronous high-rate notifications.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=48
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=48
 # Reduce NimBLE log verbosity to prevent notification flooding
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
-

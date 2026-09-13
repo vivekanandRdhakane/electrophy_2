@@ -93,6 +93,8 @@ enum class GraphMode(val label: String, val command: String) {
 
 private const val MAX_CHART_POINTS = 1500
 private const val SAMPLE_RATE_UPDATE_INTERVAL_MS = 2_000L
+private const val PREFERRED_BLE_MTU = 517
+private const val BLE_TAG = "ElectrophyBLE"
 
 data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
 
@@ -178,6 +180,33 @@ val gyroOdrOptions = listOf(
     OdrOption("3840 Hz", "3840hz"),
     OdrOption("7680 Hz", "7680hz"),
 )
+
+/**
+ * MSB-first bit reader used to unpack the 12-bit packed sample stream.
+ * `startBit` lets it skip the fixed 9-byte packet header.
+ */
+private class BitReader(private val data: ByteArray, startBit: Int = 0) {
+    var bitPos = startBit
+        private set
+
+    fun readBits(n: Int): Int {
+        if (bitPos + n > data.size * 8) return 0 // malformed packet guard
+        var v = 0
+        for (i in 0 until n) {
+            val byte = data[bitPos shr 3].toInt() and 0xFF
+            val bit = (byte ushr (7 - (bitPos and 7))) and 1
+            v = (v shl 1) or bit
+            bitPos++
+        }
+        return v
+    }
+
+    /** Reads 12 bits and sign-extends them to a signed Int. */
+    fun readSigned12(): Int {
+        val v = readBits(12)
+        return if (v and 0x800 != 0) v - 0x1000 else v
+    }
+}
 
 @SuppressLint("MissingPermission")
 class BleViewModel : ViewModel() {
@@ -329,7 +358,15 @@ class BleViewModel : ViewModel() {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 _connectionState.value = ConnectionState.Connecting
                 bluetoothGatt = gatt
-                gatt.requestMtu(256)
+                // Request the link settings needed for high-rate binary IMU streaming.
+                // Android or the peripheral can negotiate lower values when unsupported.
+                requestFastLinkParams()
+                gatt.setPreferredPhy(
+                    BluetoothDevice.PHY_LE_2M_MASK,
+                    BluetoothDevice.PHY_LE_2M_MASK,
+                    BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                )
+                gatt.requestMtu(PREFERRED_BLE_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _connectionState.value = ConnectionState.Disconnected
                 _isPaused.value = false
@@ -339,8 +376,22 @@ class BleViewModel : ViewModel() {
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.i(BLE_TAG, "MTU negotiated: $mtu bytes (status=$status)")
             gatt.discoverServices()
         }
+
+        override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            Log.i(BLE_TAG,
+                "PHY negotiated: tx=$txPhy (2M=${txPhy == BluetoothDevice.PHY_LE_2M}) " +
+                "rx=$rxPhy (2M=${rxPhy == BluetoothDevice.PHY_LE_2M}) status=$status")
+        }
+
+        override fun onPhyRead(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            Log.i(BLE_TAG,
+                "PHY read: tx=$txPhy (2M=${txPhy == BluetoothDevice.PHY_LE_2M}) " +
+                "rx=$rxPhy (2M=${rxPhy == BluetoothDevice.PHY_LE_2M}) status=$status")
+        }
+
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -363,7 +414,13 @@ class BleViewModel : ViewModel() {
                     }
                     _connectionState.value = ConnectionState.Connected
                     resetSession()
-                    sendCommand(_selectedMode.value.command + "\r\n")
+                    // The initial mode command can race the CCCD (notification
+                    // enable) write on some phones, so send it now and once more
+                    // shortly after the link settles.
+                    applyCurrentMode()
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (_connectionState.value == ConnectionState.Connected) applyCurrentMode()
+                    }, 400L)
                 } else {
                     disconnect()
                 }
@@ -385,8 +442,22 @@ class BleViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Requests the fastest connection parameters the phone will grant.
+     * Many Android devices ignore a priority request issued immediately on
+     * connect, so it is retried once shortly afterwards when the link is stable.
+     */
+    private fun requestFastLinkParams() {
+        val first = bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) == true
+        Log.i(BLE_TAG, "requestConnectionPriority(HIGH) -> $first")
+        Handler(Looper.getMainLooper()).postDelayed({
+            val retry = bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) == true
+            Log.i(BLE_TAG, "retry requestConnectionPriority(HIGH) -> $retry")
+        }, 1500L)
+    }
+
     private fun handleIncomingData(value: ByteArray) {
-        if (value.size >= 8 && value[0] == 0xAA.toByte() && value[1] == 0x55.toByte()) {
+        if (value.size >= 9 && value[0] == 0xAA.toByte() && value[1] == 0x55.toByte()) {
             processBinaryPacket(value)
         } else {
             val data = String(value, Charsets.UTF_8)
@@ -395,7 +466,7 @@ class BleViewModel : ViewModel() {
     }
 
     private fun processBinaryPacket(bytes: ByteArray) {
-        if (bytes.size < 8) return
+        if (bytes.size < 9) return
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val magic0 = buffer.get()
         val magic1 = buffer.get()
@@ -405,10 +476,13 @@ class BleViewModel : ViewModel() {
         val hgFs = buffer.get().toInt() and 0xFF
         val gyFs = buffer.get().toInt() and 0xFF
         val seq = buffer.get().toInt() and 0xFF
+        val fmt = buffer.get().toInt() and 0xFF
 
         if (sampleCount == 0) return
 
-        // Sensitivity factors
+        val packed12 = fmt == 1
+
+        // Sensitivity factors (per 16-bit LSB)
         val xlSens = when (xlFs) {
             0 -> 0.061f  // ±2g
             1 -> 0.122f  // ±4g
@@ -433,6 +507,11 @@ class BleViewModel : ViewModel() {
             else -> 70.0f
         }
 
+        // 12-bit packed values were produced by raw >> 4, so scale by sens * 16.
+        val xlScale = if (packed12) xlSens * 16f else xlSens
+        val hgScale = if (packed12) hgSens * 16f else hgSens
+        val gyScale = if (packed12) gySens * 16f else gySens
+
         val lowGList = mutableListOf<AxisPoint>()
         val highGList = mutableListOf<AxisPoint>()
         val gyroList = mutableListOf<AxisPoint>()
@@ -443,53 +522,40 @@ class BleViewModel : ViewModel() {
         val baseTime = lastAssignedTimeMs
         lastAssignedTimeMs = nowMs
 
+        val reader = if (packed12) BitReader(bytes, startBit = 9 * 8) else null
+
+        // Reads one axis in the current format and scales it.
+        fun readAxis(scale: Float): Float =
+            if (packed12) reader!!.readSigned12() * scale else buffer.short * scale
+
         for (i in 0 until sampleCount) {
             val t = (baseTime + dt * (i + 1))
 
             when (mode) {
                 1 -> { // LOW_ACC
-                    if (buffer.remaining() < 6) break
-                    val x = buffer.short * xlSens
-                    val y = buffer.short * xlSens
-                    val z = buffer.short * xlSens
-                    lowGList.add(AxisPoint(x, y, z, time = t))
+                    if (!packed12 && buffer.remaining() < 6) break
+                    lowGList.add(AxisPoint(readAxis(xlScale), readAxis(xlScale), readAxis(xlScale), time = t))
                 }
                 2 -> { // HIGH_ACC
-                    if (buffer.remaining() < 6) break
-                    val x = buffer.short * hgSens
-                    val y = buffer.short * hgSens
-                    val z = buffer.short * hgSens
-                    highGList.add(AxisPoint(x, y, z, time = t))
+                    if (!packed12 && buffer.remaining() < 6) break
+                    highGList.add(AxisPoint(readAxis(hgScale), readAxis(hgScale), readAxis(hgScale), time = t))
                 }
                 3 -> { // BOTH_ACC
-                    if (buffer.remaining() < 12) break
-                    val lgX = buffer.short * xlSens
-                    val lgY = buffer.short * xlSens
-                    val lgZ = buffer.short * xlSens
-                    val hgX = buffer.short * hgSens
-                    val hgY = buffer.short * hgSens
-                    val hgZ = buffer.short * hgSens
+                    if (!packed12 && buffer.remaining() < 12) break
+                    val lgX = readAxis(xlScale); val lgY = readAxis(xlScale); val lgZ = readAxis(xlScale)
+                    val hgX = readAxis(hgScale); val hgY = readAxis(hgScale); val hgZ = readAxis(hgScale)
                     lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
                     highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
                 }
                 4 -> { // ONLY_GYRO
-                    if (buffer.remaining() < 6) break
-                    val x = buffer.short * gySens
-                    val y = buffer.short * gySens
-                    val z = buffer.short * gySens
-                    gyroList.add(AxisPoint(x, y, z, time = t))
+                    if (!packed12 && buffer.remaining() < 6) break
+                    gyroList.add(AxisPoint(readAxis(gyScale), readAxis(gyScale), readAxis(gyScale), time = t))
                 }
                 0 -> { // ALL
-                    if (buffer.remaining() < 18) break
-                    val lgX = buffer.short * xlSens
-                    val lgY = buffer.short * xlSens
-                    val lgZ = buffer.short * xlSens
-                    val hgX = buffer.short * hgSens
-                    val hgY = buffer.short * hgSens
-                    val hgZ = buffer.short * hgSens
-                    val gyX = buffer.short * gySens
-                    val gyY = buffer.short * gySens
-                    val gyZ = buffer.short * gySens
+                    if (!packed12 && buffer.remaining() < 18) break
+                    val lgX = readAxis(xlScale); val lgY = readAxis(xlScale); val lgZ = readAxis(xlScale)
+                    val hgX = readAxis(hgScale); val hgY = readAxis(hgScale); val hgZ = readAxis(hgScale)
+                    val gyX = readAxis(gyScale); val gyY = readAxis(gyScale); val gyZ = readAxis(gyScale)
                     lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
                     highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
                     gyroList.add(AxisPoint(gyX, gyY, gyZ, time = t))
@@ -652,10 +718,19 @@ class BleViewModel : ViewModel() {
     }
 
     fun selectMode(mode: GraphMode) {
-        if (_selectedMode.value == mode) return
+        val changed = _selectedMode.value != mode
         _selectedMode.value = mode
-        clearLogs()
-        sendCommand(mode.command + "\r\n")
+        if (changed) clearLogs()
+        // Always (re)send the mode command when connected — including when the
+        // user re-taps the already-selected mode, to recover from a lost
+        // connect-time command.
+        applyCurrentMode()
+    }
+
+    private fun applyCurrentMode() {
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand(_selectedMode.value.command + "\r\n")
+        }
     }
 
     private fun processIncomingLine(rawLine: String): Boolean {
