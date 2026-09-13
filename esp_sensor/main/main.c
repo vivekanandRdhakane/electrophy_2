@@ -105,6 +105,27 @@ typedef enum {
 static volatile stream_mode_t current_stream_mode = STREAM_MODE_ALL;
 static volatile bool          g_data_paused       = false;
 
+/* ── Binary Streaming Protocol ───────────────────────────────────────────── */
+#define BINARY_MAGIC_0  0xAA
+#define BINARY_MAGIC_1  0x55
+
+typedef struct __attribute__((packed)) {
+    uint8_t magic0;        /* 0xAA */
+    uint8_t magic1;        /* 0x55 */
+    uint8_t mode;          /* stream_mode_t (0: ALL, 1: LOW_ACC, 2: HIGH_ACC, 3: BOTH_ACC, 4: ONLY_GYRO) */
+    uint8_t sample_count;  /* Number of samples in this packet */
+    uint8_t xl_fs;         /* lsm6dsv320x_xl_full_scale_t (0: 2g, 1: 4g, 2: 8g, 3: 16g) */
+    uint8_t hg_fs;         /* lsm6dsv320x_hg_xl_full_scale_t (0: 32g, 1: 64g, 2: 128g, 3: 256g, 4: 320g) */
+    uint8_t gy_fs;         /* lsm6dsv320x_gy_full_scale_t (1: 250, 2: 500, 3: 1000, 4: 2000, 5: 4000) */
+    uint8_t seq;           /* rolling packet sequence number 0..255 */
+} imu_binary_header_t;
+
+/* Local FIFO / batch accumulation buffer */
+static uint8_t  s_batch_buf[256];
+static uint8_t  s_batch_sample_count = 0;
+static uint8_t  s_batch_seq = 0;
+static int64_t  s_last_batch_send_time = 0;
+
 /* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
 /* Current output data-rate (Hz) for each sensing path; 0 = power-down.
  * Initialised to match the startup configuration below. */
@@ -357,18 +378,23 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         /* ── Stream-mode commands ──────────────────────────────────────── */
         } else if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
             current_stream_mode = STREAM_MODE_LOW_ACC;
+            s_batch_sample_count = 0;
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
             current_stream_mode = STREAM_MODE_HIGH_ACC;
+            s_batch_sample_count = 0;
             ESP_LOGI(TAG_BLE, "Switched stream mode: HIGH-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "both_acc") == 0 || strcasecmp(cmd, "acc") == 0) {
             current_stream_mode = STREAM_MODE_BOTH_ACC;
+            s_batch_sample_count = 0;
             ESP_LOGI(TAG_BLE, "Switched stream mode: BOTH ACCELEROMETERS (LOW-G + HIGH-G)");
         } else if (strcasecmp(cmd, "only_gyro") == 0 || strcasecmp(cmd, "gyro") == 0) {
             current_stream_mode = STREAM_MODE_ONLY_GYRO;
+            s_batch_sample_count = 0;
             ESP_LOGI(TAG_BLE, "Switched stream mode: GYROSCOPE ONLY");
         } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
             current_stream_mode = STREAM_MODE_ALL;
+            s_batch_sample_count = 0;
             ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
 
         /* ── Low-G accelerometer ODR commands (CTRL1 0x10) ────────────── */
@@ -611,7 +637,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
 };
 
 /* ── BLE: send ASCII string notification ──────────────────────────────────── */
-static void imu_notify_str(const char *str)
+static void __attribute__((unused)) imu_notify_str(const char *str)
 {
     if (!ble_notify_enabled || ble_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return;
@@ -628,6 +654,111 @@ static void imu_notify_str(const char *str)
         ESP_LOGW(TAG_BLE, "notify error: %d", rc);
     }
 }
+
+/* ── BLE: send raw binary notification ────────────────────────────────────── */
+static void imu_notify_bytes(const uint8_t *data, uint16_t len)
+{
+    if (!ble_notify_enabled || ble_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+    if (om == NULL) {
+        ESP_LOGW(TAG_BLE, "mbuf alloc failed — skipping binary notify");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
+    if (rc != 0 && rc != BLE_HS_ENOTCONN) {
+        ESP_LOGW(TAG_BLE, "binary notify error: %d", rc);
+    }
+}
+
+/* ── Flush accumulated binary batch to BLE ────────────────────────────────── */
+static void imu_flush_batch(void)
+{
+    if (s_batch_sample_count == 0) {
+        return;
+    }
+
+    uint8_t tuple_size;
+    switch (current_stream_mode) {
+    case STREAM_MODE_BOTH_ACC: tuple_size = 12; break;
+    case STREAM_MODE_ALL:      tuple_size = 18; break;
+    default:                   tuple_size = 6;  break;
+    }
+
+    imu_binary_header_t *hdr = (imu_binary_header_t *)s_batch_buf;
+    hdr->magic0       = BINARY_MAGIC_0;
+    hdr->magic1       = BINARY_MAGIC_1;
+    hdr->mode         = (uint8_t)current_stream_mode;
+    hdr->sample_count = s_batch_sample_count;
+    hdr->xl_fs        = (uint8_t)g_xl_fs;
+    hdr->hg_fs        = (uint8_t)g_hg_fs;
+    hdr->gy_fs        = (uint8_t)g_gy_fs;
+    hdr->seq          = s_batch_seq++;
+
+    uint16_t total_len = sizeof(imu_binary_header_t) + (s_batch_sample_count * tuple_size);
+    imu_notify_bytes(s_batch_buf, total_len);
+
+    s_batch_sample_count = 0;
+    s_last_batch_send_time = esp_timer_get_time();
+}
+
+/* ── Accumulate one sensor sample tuple into batch buffer ─────────────────── */
+static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, const int16_t *raw_gy)
+{
+    uint8_t max_samples;
+    uint8_t tuple_size;
+
+    switch (current_stream_mode) {
+    case STREAM_MODE_BOTH_ACC:
+        max_samples = 20;
+        tuple_size  = 12;
+        break;
+    case STREAM_MODE_ALL:
+        max_samples = 13;
+        tuple_size  = 18;
+        break;
+    default:
+        max_samples = 40;
+        tuple_size  = 6;
+        break;
+    }
+
+    uint8_t *dest = &s_batch_buf[sizeof(imu_binary_header_t) + (s_batch_sample_count * tuple_size)];
+
+    switch (current_stream_mode) {
+    case STREAM_MODE_LOW_ACC:
+        memcpy(dest, raw_lg, 6);
+        break;
+    case STREAM_MODE_HIGH_ACC:
+        memcpy(dest, raw_hg, 6);
+        break;
+    case STREAM_MODE_ONLY_GYRO:
+        memcpy(dest, raw_gy, 6);
+        break;
+    case STREAM_MODE_BOTH_ACC:
+        memcpy(dest,     raw_lg, 6);
+        memcpy(dest + 6, raw_hg, 6);
+        break;
+    case STREAM_MODE_ALL:
+    default:
+        memcpy(dest,      raw_lg, 6);
+        memcpy(dest + 6,  raw_hg, 6);
+        memcpy(dest + 12, raw_gy, 6);
+        break;
+    }
+
+    s_batch_sample_count++;
+
+    int64_t now = esp_timer_get_time();
+    /* Flush if batch capacity reached OR >= 30 ms elapsed (~33 fps visual refresh) */
+    if (s_batch_sample_count >= max_samples || (now - s_last_batch_send_time >= 30000LL)) {
+        imu_flush_batch();
+    }
+}
+
 
 /* ── BLE: GAP event handler ───────────────────────────────────────────────── */
 static void ble_start_advertising(void); /* forward declaration */
@@ -658,6 +789,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                  event->disconnect.reason);
         ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
         ble_notify_enabled = false;
+        s_batch_sample_count = 0;
         xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
         ble_start_advertising();
         break;
@@ -855,10 +987,6 @@ static void sensor_task(void *arg)
     int16_t data_raw_acceleration[3];
     int16_t data_raw_hg_acceleration[3];
     int16_t data_raw_angular_rate[3];
-    float   acceleration_mg[3];
-    float   hg_acceleration_g[3];
-    float   angular_rate_mdps[3];
-    char    ble_str[256]; /* buffer for the ASCII notification string */
 
     while (1) {
         /* ── Gate: pause until a BLE central is connected ─────────────── */
@@ -882,6 +1010,7 @@ static void sensor_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(50));
             /* Clear any accumulated notification so resuming starts cleanly */
             ulTaskNotifyTake(pdTRUE, 0);
+            s_batch_sample_count = 0;
             continue;
         }
 
@@ -893,80 +1022,33 @@ static void sensor_task(void *arg)
         memset(data_raw_hg_acceleration, 0, sizeof(data_raw_hg_acceleration));
         memset(data_raw_angular_rate, 0, sizeof(data_raw_angular_rate));
 
-        /* Read Low-G Accelerometer */
-        lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-        acceleration_mg[0] = convert_xl_to_mg(data_raw_acceleration[0], g_xl_fs);
-        acceleration_mg[1] = convert_xl_to_mg(data_raw_acceleration[1], g_xl_fs);
-        acceleration_mg[2] = convert_xl_to_mg(data_raw_acceleration[2], g_xl_fs);
+        /* Read active sensors based on selected stream mode */
+        if (current_stream_mode == STREAM_MODE_LOW_ACC || current_stream_mode == STREAM_MODE_BOTH_ACC || current_stream_mode == STREAM_MODE_ALL) {
+            lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+        }
+        if (current_stream_mode == STREAM_MODE_HIGH_ACC || current_stream_mode == STREAM_MODE_BOTH_ACC || current_stream_mode == STREAM_MODE_ALL) {
+            lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
+        }
+        if (current_stream_mode == STREAM_MODE_ONLY_GYRO || current_stream_mode == STREAM_MODE_ALL) {
+            lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
+        }
 
-        /* Read High-G Accelerometer */
-        lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
-        hg_acceleration_g[0] = convert_hg_to_g(data_raw_hg_acceleration[0], g_hg_fs);
-        hg_acceleration_g[1] = convert_hg_to_g(data_raw_hg_acceleration[1], g_hg_fs);
-        hg_acceleration_g[2] = convert_hg_to_g(data_raw_hg_acceleration[2], g_hg_fs);
+        /* Accumulate raw sample into batch buffer (auto-flushes if full or >= 30 ms) */
+        imu_accumulate_sample(data_raw_acceleration, data_raw_hg_acceleration, data_raw_angular_rate);
 
-        /* Read Gyroscope */
-        lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
-        angular_rate_mdps[0] = convert_gy_to_mdps(data_raw_angular_rate[0], g_gy_fs);
-        angular_rate_mdps[1] = convert_gy_to_mdps(data_raw_angular_rate[1], g_gy_fs);
-        angular_rate_mdps[2] = convert_gy_to_mdps(data_raw_angular_rate[2], g_gy_fs);
-
-        static int64_t last_send_time = 0;
+        /* Flush on timeout if any samples pending and >= 30 ms */
         int64_t now = esp_timer_get_time();
+        if (s_batch_sample_count > 0 && (now - s_last_batch_send_time >= 30000LL)) {
+            imu_flush_batch();
+        }
 
-        /* Send one packet per sensor cycle (interval = period of slowest active ODR) */
-        if (now - last_send_time >= g_send_interval_us) {
-            last_send_time = now;
-
-            /* Format according to active streaming mode */
-            switch (current_stream_mode) {
-            case STREAM_MODE_LOW_ACC:
-                snprintf(ble_str, sizeof(ble_str),
-                         "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f\r\n",
-                         acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
-                break;
-
-            case STREAM_MODE_HIGH_ACC:
-                snprintf(ble_str, sizeof(ble_str),
-                         "[High-G g] X=%6.2f Y=%6.2f Z=%6.2f\r\n",
-                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2]);
-                break;
-
-            case STREAM_MODE_BOTH_ACC:
-                snprintf(ble_str, sizeof(ble_str),
-                         "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  "
-                         "[HG g] X=%6.2f Y=%6.2f Z=%6.2f\r\n",
-                         acceleration_mg[0], acceleration_mg[1], acceleration_mg[2],
-                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2]);
-                break;
-
-            case STREAM_MODE_ONLY_GYRO:
-                snprintf(ble_str, sizeof(ble_str),
-                         "[mdps] X=%8.2f Y=%8.2f Z=%8.2f\r\n",
-                         angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
-                break;
-
-            case STREAM_MODE_ALL:
-            default:
-                snprintf(ble_str, sizeof(ble_str),
-                         "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  "
-                         "[HG g] X=%6.2f Y=%6.2f Z=%6.2f  "
-                         "[mdps] X=%8.2f Y=%8.2f Z=%8.2f\r\n",
-                         acceleration_mg[0],   acceleration_mg[1],   acceleration_mg[2],
-                         hg_acceleration_g[0], hg_acceleration_g[1], hg_acceleration_g[2],
-                         angular_rate_mdps[0], angular_rate_mdps[1], angular_rate_mdps[2]);
-                break;
-            }
-
-            /* Update cache for GATT Read */
-            strncpy(latest_ble_str, ble_str, sizeof(latest_ble_str) - 1);
-            latest_ble_str[sizeof(latest_ble_str) - 1] = '\0';
-
-            /* Serial output (debug level to prevent terminal flooding) */
-            ESP_LOGD(TAG, "%s", ble_str);
-
-            /* BLE notification (ASCII string — readable directly in nRF Connect) */
-            imu_notify_str(ble_str);
+        /* Periodically update latest_ble_str for GATT Read (every 1s) */
+        static int64_t last_status_update = 0;
+        if (now - last_status_update >= 1000000LL) {
+            last_status_update = now;
+            snprintf(latest_ble_str, sizeof(latest_ble_str),
+                     "ESP_IMU Binary: mode=%d count=%u seq=%u\r\n",
+                     current_stream_mode, s_batch_sample_count, s_batch_seq);
         }
     }
 }

@@ -54,6 +54,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import java.util.Locale
 import android.view.ViewGroup
@@ -182,10 +184,12 @@ class BleViewModel : ViewModel() {
 
     private var sessionStartTimeMs = System.currentTimeMillis()
     private var lastAssignedTimeMs = 0L
+    private var lastTerminalUpdateTimeMs = 0L
 
     private fun resetSession() {
         sessionStartTimeMs = System.currentTimeMillis()
         lastAssignedTimeMs = 0L
+        lastTerminalUpdateTimeMs = 0L
     }
 
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
@@ -358,17 +362,212 @@ class BleViewModel : ViewModel() {
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
             if (characteristic.uuid == TX_CHAR_UUID) {
-                val data = String(value, Charsets.UTF_8)
-                appendLog(data)
+                handleIncomingData(value)
             }
         }
 
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid == TX_CHAR_UUID) {
-                val data = String(characteristic.value, Charsets.UTF_8)
-                appendLog(data)
+                val v = characteristic.value ?: return
+                handleIncomingData(v)
             }
+        }
+    }
+
+    private fun handleIncomingData(value: ByteArray) {
+        if (value.size >= 8 && value[0] == 0xAA.toByte() && value[1] == 0x55.toByte()) {
+            processBinaryPacket(value)
+        } else {
+            val data = String(value, Charsets.UTF_8)
+            appendLog(data)
+        }
+    }
+
+    private fun processBinaryPacket(bytes: ByteArray) {
+        if (bytes.size < 8) return
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val magic0 = buffer.get()
+        val magic1 = buffer.get()
+        val mode = buffer.get().toInt() and 0xFF
+        val sampleCount = buffer.get().toInt() and 0xFF
+        val xlFs = buffer.get().toInt() and 0xFF
+        val hgFs = buffer.get().toInt() and 0xFF
+        val gyFs = buffer.get().toInt() and 0xFF
+        val seq = buffer.get().toInt() and 0xFF
+
+        if (sampleCount == 0) return
+
+        // Sensitivity factors
+        val xlSens = when (xlFs) {
+            0 -> 0.061f  // ±2g
+            1 -> 0.122f  // ±4g
+            2 -> 0.244f  // ±8g
+            3 -> 0.488f  // ±16g
+            else -> 0.061f
+        }
+        val hgSens = when (hgFs) {
+            0 -> 0.000976f // ±32g (in g)
+            1 -> 0.001953f // ±64g
+            2 -> 0.003906f // ±128g
+            3 -> 0.007812f // ±256g
+            4 -> 0.009765f // ±320g
+            else -> 0.009765f
+        }
+        val gySens = when (gyFs) {
+            1 -> 8.75f   // ±250dps (in mdps)
+            2 -> 17.50f  // ±500dps
+            3 -> 35.0f   // ±1000dps
+            4 -> 70.0f   // ±2000dps
+            5 -> 140.0f  // ±4000dps
+            else -> 70.0f
+        }
+
+        val lowGList = mutableListOf<AxisPoint>()
+        val highGList = mutableListOf<AxisPoint>()
+        val gyroList = mutableListOf<AxisPoint>()
+
+        val rawNowMs = System.currentTimeMillis() - sessionStartTimeMs
+        val nowMs = if (rawNowMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawNowMs
+        val dt = (nowMs - lastAssignedTimeMs).toFloat() / sampleCount.coerceAtLeast(1)
+        val baseTime = lastAssignedTimeMs
+        lastAssignedTimeMs = nowMs
+
+        for (i in 0 until sampleCount) {
+            val t = (baseTime + dt * (i + 1))
+
+            when (mode) {
+                1 -> { // LOW_ACC
+                    if (buffer.remaining() < 6) break
+                    val x = buffer.short * xlSens
+                    val y = buffer.short * xlSens
+                    val z = buffer.short * xlSens
+                    lowGList.add(AxisPoint(x, y, z, time = t))
+                }
+                2 -> { // HIGH_ACC
+                    if (buffer.remaining() < 6) break
+                    val x = buffer.short * hgSens
+                    val y = buffer.short * hgSens
+                    val z = buffer.short * hgSens
+                    highGList.add(AxisPoint(x, y, z, time = t))
+                }
+                3 -> { // BOTH_ACC
+                    if (buffer.remaining() < 12) break
+                    val lgX = buffer.short * xlSens
+                    val lgY = buffer.short * xlSens
+                    val lgZ = buffer.short * xlSens
+                    val hgX = buffer.short * hgSens
+                    val hgY = buffer.short * hgSens
+                    val hgZ = buffer.short * hgSens
+                    lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
+                    highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
+                }
+                4 -> { // ONLY_GYRO
+                    if (buffer.remaining() < 6) break
+                    val x = buffer.short * gySens
+                    val y = buffer.short * gySens
+                    val z = buffer.short * gySens
+                    gyroList.add(AxisPoint(x, y, z, time = t))
+                }
+                0 -> { // ALL
+                    if (buffer.remaining() < 18) break
+                    val lgX = buffer.short * xlSens
+                    val lgY = buffer.short * xlSens
+                    val lgZ = buffer.short * xlSens
+                    val hgX = buffer.short * hgSens
+                    val hgY = buffer.short * hgSens
+                    val hgZ = buffer.short * hgSens
+                    val gyX = buffer.short * gySens
+                    val gyY = buffer.short * gySens
+                    val gyZ = buffer.short * gySens
+                    lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
+                    highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
+                    gyroList.add(AxisPoint(gyX, gyY, gyZ, time = t))
+                }
+            }
+        }
+
+        appendBatchPoints(lowGList, highGList, gyroList)
+
+        // Human-readable terminal update (throttled to ~10 Hz to prevent UI thread lag)
+        val now = System.currentTimeMillis()
+        if (now - lastTerminalUpdateTimeMs >= 100L) {
+            lastTerminalUpdateTimeMs = now
+            val terminalLine = when (mode) {
+                1 -> {
+                    val pt = lowGList.lastOrNull()
+                    if (pt != null) String.format(Locale.US, "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f", pt.x, pt.y, pt.z) else null
+                }
+                2 -> {
+                    val pt = highGList.lastOrNull()
+                    if (pt != null) String.format(Locale.US, "[High-G g] X=%6.2f Y=%6.2f Z=%6.2f", pt.x, pt.y, pt.z) else null
+                }
+                3 -> {
+                    val lg = lowGList.lastOrNull()
+                    val hg = highGList.lastOrNull()
+                    if (lg != null && hg != null) {
+                        String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f", lg.x, lg.y, lg.z, hg.x, hg.y, hg.z)
+                    } else null
+                }
+                4 -> {
+                    val pt = gyroList.lastOrNull()
+                    if (pt != null) String.format(Locale.US, "[mdps] X=%8.2f Y=%8.2f Z=%8.2f", pt.x, pt.y, pt.z) else null
+                }
+                0 -> {
+                    val lg = lowGList.lastOrNull()
+                    val hg = highGList.lastOrNull()
+                    val gy = gyroList.lastOrNull()
+                    if (lg != null && hg != null && gy != null) {
+                        String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f  [mdps] X=%8.2f Y=%8.2f Z=%8.2f",
+                            lg.x, lg.y, lg.z, hg.x, hg.y, hg.z, gy.x, gy.y, gy.z)
+                    } else null
+                }
+                else -> null
+            }
+
+            if (terminalLine != null) {
+                _logMessages.update { current ->
+                    val updated = current.toMutableList()
+                    updated.add(terminalLine)
+                    if (updated.size > 200) {
+                        updated.subList(0, updated.size - 200).clear()
+                    }
+                    updated
+                }
+            }
+        }
+
+        if (_isRecording.value) {
+            logFile?.let { file ->
+                val sb = StringBuilder()
+                val count = maxOf(lowGList.size, highGList.size, gyroList.size)
+                for (i in 0 until count) {
+                    val lg = lowGList.getOrNull(i)
+                    val hg = highGList.getOrNull(i)
+                    val gy = gyroList.getOrNull(i)
+                    if (lg != null) sb.append(String.format(Locale.US, "[Low-G mg] X=%.2f Y=%.2f Z=%.2f ", lg.x, lg.y, lg.z))
+                    if (hg != null) sb.append(String.format(Locale.US, "[High-G g] X=%.2f Y=%.2f Z=%.2f ", hg.x, hg.y, hg.z))
+                    if (gy != null) sb.append(String.format(Locale.US, "[Gyro mdps] X=%.2f Y=%.2f Z=%.2f ", gy.x, gy.y, gy.z))
+                    sb.append("\n")
+                }
+                file.appendText(sb.toString())
+            }
+        }
+    }
+
+    private fun appendBatchPoints(
+        newLowG: List<AxisPoint> = emptyList(),
+        newHighG: List<AxisPoint> = emptyList(),
+        newGyro: List<AxisPoint> = emptyList()
+    ) {
+        if (newLowG.isEmpty() && newHighG.isEmpty() && newGyro.isEmpty()) return
+
+        _chartData.update { current ->
+            current.copy(
+                lowG = if (newLowG.isNotEmpty()) (current.lowG + newLowG).takeLast(MAX_CHART_POINTS) else current.lowG,
+                highG = if (newHighG.isNotEmpty()) (current.highG + newHighG).takeLast(MAX_CHART_POINTS) else current.highG,
+                gyro = if (newGyro.isNotEmpty()) (current.gyro + newGyro).takeLast(MAX_CHART_POINTS) else current.gyro,
+            )
         }
     }
 
@@ -917,7 +1116,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 val listState = rememberLazyListState()
                 LaunchedEffect(logMessages.size) {
                     if (logMessages.isNotEmpty()) {
-                        listState.animateScrollToItem(logMessages.size - 1)
+                        listState.scrollToItem(logMessages.size - 1)
                     }
                 }
 
