@@ -111,6 +111,46 @@ static volatile float g_xl_odr_hz  = 15.0f;   /* Low-G  accel  — CTRL1  */
 static volatile float g_gy_odr_hz  = 15.0f;   /* Gyro          — CTRL2  */
 static volatile float g_hg_odr_hz  = 480.0f;  /* High-G accel  — CTRL1_XL_HG */
 
+/* ── Dynamic Full-Scale (Range) tracking ──────────────────────────────────── */
+static volatile lsm6dsv320x_xl_full_scale_t    g_xl_fs = LSM6DSV320X_2g;
+static volatile lsm6dsv320x_hg_xl_full_scale_t g_hg_fs = LSM6DSV320X_320g;
+static volatile lsm6dsv320x_gy_full_scale_t    g_gy_fs = LSM6DSV320X_2000dps;
+
+static inline float convert_xl_to_mg(int16_t lsb, lsm6dsv320x_xl_full_scale_t fs)
+{
+    switch (fs) {
+    case LSM6DSV320X_2g:  return lsm6dsv320x_from_fs2_to_mg(lsb);
+    case LSM6DSV320X_4g:  return lsm6dsv320x_from_fs4_to_mg(lsb);
+    case LSM6DSV320X_8g:  return lsm6dsv320x_from_fs8_to_mg(lsb);
+    case LSM6DSV320X_16g: return lsm6dsv320x_from_fs16_to_mg(lsb);
+    default:              return lsm6dsv320x_from_fs2_to_mg(lsb);
+    }
+}
+
+static inline float convert_hg_to_g(int16_t lsb, lsm6dsv320x_hg_xl_full_scale_t fs)
+{
+    switch (fs) {
+    case LSM6DSV320X_32g:  return lsm6dsv320x_from_fs32_to_mg(lsb) / 1000.0f;
+    case LSM6DSV320X_64g:  return lsm6dsv320x_from_fs64_to_mg(lsb) / 1000.0f;
+    case LSM6DSV320X_128g: return lsm6dsv320x_from_fs128_to_mg(lsb) / 1000.0f;
+    case LSM6DSV320X_256g: return lsm6dsv320x_from_fs256_to_mg(lsb) / 1000.0f;
+    case LSM6DSV320X_320g: return lsm6dsv320x_from_fs320_to_mg(lsb) / 1000.0f;
+    default:               return lsm6dsv320x_from_fs320_to_mg(lsb) / 1000.0f;
+    }
+}
+
+static inline float convert_gy_to_mdps(int16_t lsb, lsm6dsv320x_gy_full_scale_t fs)
+{
+    switch (fs) {
+    case LSM6DSV320X_250dps:  return lsm6dsv320x_from_fs250_to_mdps(lsb);
+    case LSM6DSV320X_500dps:  return lsm6dsv320x_from_fs500_to_mdps(lsb);
+    case LSM6DSV320X_1000dps: return lsm6dsv320x_from_fs1000_to_mdps(lsb);
+    case LSM6DSV320X_2000dps: return lsm6dsv320x_from_fs2000_to_mdps(lsb);
+    case LSM6DSV320X_4000dps: return lsm6dsv320x_from_fs4000_to_mdps(lsb);
+    default:                  return lsm6dsv320x_from_fs2000_to_mdps(lsb);
+    }
+}
+
 /* Derived timing — updated by odr_recompute_timing() after every ODR change.
  * Send-interval: one BLE packet per cycle of the slowest active sensor.
  * DRDY timeout : 5× the slowest period (floor 50 ms) so a missed INT1 pulse
@@ -456,13 +496,78 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
             g_gy_odr_hz = 7680.0f; odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Gyro ODR set to 7680 Hz");
 
+        /* ── Low-G accelerometer range commands (CTRL8 0x17) ──────────── */
+        } else if (strcasecmp(cmd, "range_low_g_2g") == 0 || strcasecmp(cmd, "fs_low_g_2g") == 0) {
+            lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+            g_xl_fs = LSM6DSV320X_2g;
+            ESP_LOGI(TAG_BLE, "Low-G range set to ±2g");
+        } else if (strcasecmp(cmd, "range_low_g_4g") == 0 || strcasecmp(cmd, "fs_low_g_4g") == 0) {
+            lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_4g);
+            g_xl_fs = LSM6DSV320X_4g;
+            ESP_LOGI(TAG_BLE, "Low-G range set to ±4g");
+        } else if (strcasecmp(cmd, "range_low_g_8g") == 0 || strcasecmp(cmd, "fs_low_g_8g") == 0) {
+            lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_8g);
+            g_xl_fs = LSM6DSV320X_8g;
+            ESP_LOGI(TAG_BLE, "Low-G range set to ±8g");
+        } else if (strcasecmp(cmd, "range_low_g_16g") == 0 || strcasecmp(cmd, "fs_low_g_16g") == 0) {
+            lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_16g);
+            g_xl_fs = LSM6DSV320X_16g;
+            ESP_LOGI(TAG_BLE, "Low-G range set to ±16g");
+
+        /* ── High-G accelerometer range commands (CTRL1_XL_HG 0x4E) ───── */
+        } else if (strcasecmp(cmd, "range_high_g_32g") == 0 || strcasecmp(cmd, "fs_high_g_32g") == 0) {
+            lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_32g);
+            g_hg_fs = LSM6DSV320X_32g;
+            ESP_LOGI(TAG_BLE, "High-G range set to ±32g");
+        } else if (strcasecmp(cmd, "range_high_g_64g") == 0 || strcasecmp(cmd, "fs_high_g_64g") == 0) {
+            lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_64g);
+            g_hg_fs = LSM6DSV320X_64g;
+            ESP_LOGI(TAG_BLE, "High-G range set to ±64g");
+        } else if (strcasecmp(cmd, "range_high_g_128g") == 0 || strcasecmp(cmd, "fs_high_g_128g") == 0) {
+            lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_128g);
+            g_hg_fs = LSM6DSV320X_128g;
+            ESP_LOGI(TAG_BLE, "High-G range set to ±128g");
+        } else if (strcasecmp(cmd, "range_high_g_256g") == 0 || strcasecmp(cmd, "fs_high_g_256g") == 0) {
+            lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_256g);
+            g_hg_fs = LSM6DSV320X_256g;
+            ESP_LOGI(TAG_BLE, "High-G range set to ±256g");
+        } else if (strcasecmp(cmd, "range_high_g_320g") == 0 || strcasecmp(cmd, "fs_high_g_320g") == 0) {
+            lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_320g);
+            g_hg_fs = LSM6DSV320X_320g;
+            ESP_LOGI(TAG_BLE, "High-G range set to ±320g");
+
+        /* ── Gyroscope range commands (CTRL6 0x15) ────────────────────── */
+        } else if (strcasecmp(cmd, "range_gyro_250dps") == 0 || strcasecmp(cmd, "fs_gyro_250dps") == 0 || strcasecmp(cmd, "range_gyro_250") == 0) {
+            lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_250dps);
+            g_gy_fs = LSM6DSV320X_250dps;
+            ESP_LOGI(TAG_BLE, "Gyro range set to ±250 dps");
+        } else if (strcasecmp(cmd, "range_gyro_500dps") == 0 || strcasecmp(cmd, "fs_gyro_500dps") == 0 || strcasecmp(cmd, "range_gyro_500") == 0) {
+            lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_500dps);
+            g_gy_fs = LSM6DSV320X_500dps;
+            ESP_LOGI(TAG_BLE, "Gyro range set to ±500 dps");
+        } else if (strcasecmp(cmd, "range_gyro_1000dps") == 0 || strcasecmp(cmd, "fs_gyro_1000dps") == 0 || strcasecmp(cmd, "range_gyro_1000") == 0) {
+            lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_1000dps);
+            g_gy_fs = LSM6DSV320X_1000dps;
+            ESP_LOGI(TAG_BLE, "Gyro range set to ±1000 dps");
+        } else if (strcasecmp(cmd, "range_gyro_2000dps") == 0 || strcasecmp(cmd, "fs_gyro_2000dps") == 0 || strcasecmp(cmd, "range_gyro_2000") == 0) {
+            lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_2000dps);
+            g_gy_fs = LSM6DSV320X_2000dps;
+            ESP_LOGI(TAG_BLE, "Gyro range set to ±2000 dps");
+        } else if (strcasecmp(cmd, "range_gyro_4000dps") == 0 || strcasecmp(cmd, "fs_gyro_4000dps") == 0 || strcasecmp(cmd, "range_gyro_4000") == 0) {
+            lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_4000dps);
+            g_gy_fs = LSM6DSV320X_4000dps;
+            ESP_LOGI(TAG_BLE, "Gyro range set to ±4000 dps");
+
         } else {
             ESP_LOGW(TAG_BLE,
                      "Unknown command \"%s\".\n"
-                     "  Stream:    low_acc | high_acc | both_acc | only_gyro | all\n"
-                     "  Low-G ODR: odr_low_g_{off|1hz875|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}\n"
-                     "  High-G ODR:odr_high_g_{off|480hz|960hz|1920hz|3840hz|7680hz}\n"
-                     "  Gyro ODR:  odr_gyro_{off|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}",
+                     "  Stream:       low_acc | high_acc | both_acc | only_gyro | all\n"
+                     "  Low-G ODR:    odr_low_g_{off|1hz875|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}\n"
+                     "  High-G ODR:   odr_high_g_{off|480hz|960hz|1920hz|3840hz|7680hz}\n"
+                     "  Gyro ODR:     odr_gyro_{off|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}\n"
+                     "  Low-G Range:  range_low_g_{2g|4g|8g|16g}\n"
+                     "  High-G Range: range_high_g_{32g|64g|128g|256g|320g}\n"
+                     "  Gyro Range:   range_gyro_{250dps|500dps|1000dps|2000dps|4000dps}",
                      cmd);
         }
         return 0;
@@ -767,23 +872,23 @@ static void sensor_task(void *arg)
         memset(data_raw_hg_acceleration, 0, sizeof(data_raw_hg_acceleration));
         memset(data_raw_angular_rate, 0, sizeof(data_raw_angular_rate));
 
-        /* Read Low-G Accelerometer (±2g) */
+        /* Read Low-G Accelerometer */
         lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-        acceleration_mg[0] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[0]);
-        acceleration_mg[1] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]);
-        acceleration_mg[2] = lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]);
+        acceleration_mg[0] = convert_xl_to_mg(data_raw_acceleration[0], g_xl_fs);
+        acceleration_mg[1] = convert_xl_to_mg(data_raw_acceleration[1], g_xl_fs);
+        acceleration_mg[2] = convert_xl_to_mg(data_raw_acceleration[2], g_xl_fs);
 
-        /* Read High-G Accelerometer (±320g) */
+        /* Read High-G Accelerometer */
         lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
-        hg_acceleration_g[0] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[0]) / 1000.0f;
-        hg_acceleration_g[1] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[1]) / 1000.0f;
-        hg_acceleration_g[2] = lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[2]) / 1000.0f;
+        hg_acceleration_g[0] = convert_hg_to_g(data_raw_hg_acceleration[0], g_hg_fs);
+        hg_acceleration_g[1] = convert_hg_to_g(data_raw_hg_acceleration[1], g_hg_fs);
+        hg_acceleration_g[2] = convert_hg_to_g(data_raw_hg_acceleration[2], g_hg_fs);
 
-        /* Read Gyroscope (±2000dps) */
+        /* Read Gyroscope */
         lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
-        angular_rate_mdps[0] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[0]);
-        angular_rate_mdps[1] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[1]);
-        angular_rate_mdps[2] = lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[2]);
+        angular_rate_mdps[0] = convert_gy_to_mdps(data_raw_angular_rate[0], g_gy_fs);
+        angular_rate_mdps[1] = convert_gy_to_mdps(data_raw_angular_rate[1], g_gy_fs);
+        angular_rate_mdps[2] = convert_gy_to_mdps(data_raw_angular_rate[2], g_gy_fs);
 
         static int64_t last_send_time = 0;
         int64_t now = esp_timer_get_time();

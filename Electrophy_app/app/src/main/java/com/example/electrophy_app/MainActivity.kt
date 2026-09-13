@@ -90,6 +90,8 @@ data class ChartData(
 
 data class OdrOption(val label: String, val suffix: String)
 
+data class RangeOption(val label: String, val suffix: String)
+
 data class TimeWindowOption(val label: String, val seconds: Float)
 
 val timeWindowOptions = listOf(
@@ -98,6 +100,29 @@ val timeWindowOptions = listOf(
     TimeWindowOption("5 sec", 5f),
     TimeWindowOption("10 sec", 10f),
     TimeWindowOption("30 sec", 30f),
+)
+
+val lowGRangeOptions = listOf(
+    RangeOption("±2 g", "2g"),
+    RangeOption("±4 g", "4g"),
+    RangeOption("±8 g", "8g"),
+    RangeOption("±16 g", "16g"),
+)
+
+val highGRangeOptions = listOf(
+    RangeOption("±32 g", "32g"),
+    RangeOption("±64 g", "64g"),
+    RangeOption("±128 g", "128g"),
+    RangeOption("±256 g", "256g"),
+    RangeOption("±320 g", "320g"),
+)
+
+val gyroRangeOptions = listOf(
+    RangeOption("±250 dps", "250dps"),
+    RangeOption("±500 dps", "500dps"),
+    RangeOption("±1000 dps", "1000dps"),
+    RangeOption("±2000 dps", "2000dps"),
+    RangeOption("±4000 dps", "4000dps"),
 )
 
 val lowGOdrOptions = listOf(
@@ -171,11 +196,44 @@ class BleViewModel : ViewModel() {
     private val _gyroOdr = MutableStateFlow("15hz")
     val gyroOdr: StateFlow<String> = _gyroOdr
 
+    private val _lowGRange = MutableStateFlow("2g")
+    val lowGRange: StateFlow<String> = _lowGRange
+
+    private val _highGRange = MutableStateFlow("320g")
+    val highGRange: StateFlow<String> = _highGRange
+
+    private val _gyroRange = MutableStateFlow("2000dps")
+    val gyroRange: StateFlow<String> = _gyroRange
+
     private val _timeWindowSec = MutableStateFlow(5f)
     val timeWindowSec: StateFlow<Float> = _timeWindowSec
 
     fun setTimeWindow(seconds: Float) {
         _timeWindowSec.value = seconds
+    }
+
+    fun setLowGRange(suffix: String) {
+        if (_lowGRange.value == suffix) return
+        _lowGRange.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("range_low_g_$suffix")
+        }
+    }
+
+    fun setHighGRange(suffix: String) {
+        if (_highGRange.value == suffix) return
+        _highGRange.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("range_high_g_$suffix")
+        }
+    }
+
+    fun setGyroRange(suffix: String) {
+        if (_gyroRange.value == suffix) return
+        _gyroRange.value = suffix
+        if (_connectionState.value == ConnectionState.Connected) {
+            sendCommand("range_gyro_$suffix")
+        }
     }
 
     fun setLowGOdr(suffix: String) {
@@ -485,6 +543,9 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val lowGOdr by viewModel.lowGOdr.collectAsState()
     val highGOdr by viewModel.highGOdr.collectAsState()
     val gyroOdr by viewModel.gyroOdr.collectAsState()
+    val lowGRange by viewModel.lowGRange.collectAsState()
+    val highGRange by viewModel.highGRange.collectAsState()
+    val gyroRange by viewModel.gyroRange.collectAsState()
     val timeWindowSec by viewModel.timeWindowSec.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
 
@@ -713,6 +774,68 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                 onSelected = { viewModel.setTimeWindow(it) }
                             )
                         }
+                    }
+                }
+            }
+
+            // Full-Scale Range Section
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Full-Scale Range",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            RangeDropdown(
+                                title = "Low-G Range",
+                                options = lowGRangeOptions,
+                                selectedSuffix = lowGRange,
+                                enabled = true,
+                                onSelected = { viewModel.setLowGRange(it) }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            RangeDropdown(
+                                title = "High-G Range",
+                                options = highGRangeOptions,
+                                selectedSuffix = highGRange,
+                                enabled = true,
+                                onSelected = { viewModel.setHighGRange(it) }
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            RangeDropdown(
+                                title = "Gyro Range",
+                                options = gyroRangeOptions,
+                                selectedSuffix = gyroRange,
+                                enabled = true,
+                                onSelected = { viewModel.setGyroRange(it) }
+                            )
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -988,6 +1111,72 @@ private fun TimeWindowDropdown(
                         text = { Text(option.label) },
                         onClick = {
                             onSelected(option.seconds)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RangeDropdown(
+    title: String,
+    options: List<RangeOption>,
+    selectedSuffix: String,
+    enabled: Boolean,
+    onSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedOption = options.find { it.suffix == selectedSuffix } ?: options.first()
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(bottom = 1.dp)
+        )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (enabled) expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = selectedOption.label,
+                onValueChange = {},
+                readOnly = true,
+                enabled = enabled,
+                textStyle = MaterialTheme.typography.bodyMedium,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
+                ),
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .pointerInput(enabled) {
+                        detectTapGestures(
+                            onTap = {
+                                if (enabled) {
+                                    expanded = !expanded
+                                }
+                            }
+                        )
+                    },
+                singleLine = true
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = {
+                            onSelected(option.suffix)
                             expanded = false
                         }
                     )
