@@ -41,6 +41,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -59,10 +62,16 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.components.YAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.github.mikephil.charting.formatter.ValueFormatter
+import com.github.mikephil.charting.highlight.Highlight
+import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
+import com.github.mikephil.charting.listener.OnChartValueSelectedListener
+import com.github.mikephil.charting.utils.MPPointD
+import kotlin.math.abs
 
 // UUIDs
 val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -706,18 +715,21 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         title = "Low-G Accelerometer (mg)",
                         points = chartData.lowG,
                         timeWindowSec = timeWindowSec,
+                        isPaused = isPaused,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.HIGH_G -> SensorChart(
                         title = "High-G Accelerometer (g)",
                         points = chartData.highG,
                         timeWindowSec = timeWindowSec,
+                        isPaused = isPaused,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.GYRO -> SensorChart(
                         title = "Gyroscope (mdps)",
                         points = chartData.gyro,
                         timeWindowSec = timeWindowSec,
+                        isPaused = isPaused,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.BOTH_ACC -> Column(modifier = Modifier.fillMaxSize()) {
@@ -725,12 +737,14 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                             title = "Low-G Accelerometer (mg)",
                             points = chartData.lowG,
                             timeWindowSec = timeWindowSec,
+                            isPaused = isPaused,
                             modifier = Modifier.weight(1f),
                         )
                         SensorChart(
                             title = "High-G Accelerometer (g)",
                             points = chartData.highG,
                             timeWindowSec = timeWindowSec,
+                            isPaused = isPaused,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -939,8 +953,17 @@ private fun SensorChart(
     title: String,
     points: List<AxisPoint>,
     timeWindowSec: Float,
+    isPaused: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    var cursor1 by remember(isPaused) { mutableStateOf<Entry?>(null) }
+    var cursor2 by remember(isPaused) { mutableStateOf<Entry?>(null) }
+    val chartRef = remember { mutableStateOf<LineChart?>(null) }
+
+    var showX by remember { mutableStateOf(true) }
+    var showY by remember { mutableStateOf(true) }
+    var showZ by remember { mutableStateOf(true) }
+
     Column(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -954,100 +977,228 @@ private fun SensorChart(
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onBackground,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                LegendDot(Color.Red, "X")
-                LegendDot(Color.Green, "Y")
-                LegendDot(Color.Blue, "Z")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ClickableLegend(Color.Red, "X", showX) { showX = !showX }
+                ClickableLegend(Color.Green, "Y", showY) { showY = !showY }
+                ClickableLegend(Color.Blue, "Z", showZ) { showZ = !showZ }
             }
         }
 
-        AndroidView(
-            factory = { ctx ->
-                LineChart(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    description.isEnabled = false
-                    setTouchEnabled(true)
-                    isDragEnabled = false
-                    setScaleEnabled(false)
-                    setPinchZoom(false)
-                    setBackgroundColor(android.graphics.Color.parseColor("#101418"))
-                    
-                    xAxis.apply {
-                        textColor = android.graphics.Color.WHITE
-                        position = XAxis.XAxisPosition.BOTTOM
-                        setDrawGridLines(true)
-                        gridColor = android.graphics.Color.parseColor("#333333")
-                        valueFormatter = object : ValueFormatter() {
-                            override fun getFormattedValue(value: Float): String {
-                                return String.format(Locale.US, "%.1fs", value / 1000f)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .pointerInput(points, isPaused, timeWindowSec) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
+                            val pressed = event.changes.filter { it.pressed }
+
+                            if (pressed.size >= 2 && isPaused) {
+                                val chart = chartRef.value
+                                if (chart != null) {
+                                    val p1 = pressed[0].position
+                                    val p2 = pressed[1].position
+                                    val h1 = chart.getHighlightByTouchPoint(p1.x, p1.y)
+                                    val h2 = chart.getHighlightByTouchPoint(p2.x, p2.y)
+                                    if (h1 != null && h2 != null) {
+                                        cursor1 = Entry(h1.x, h1.y)
+                                        cursor2 = Entry(h2.x, h2.y)
+                                    }
+                                }
+                            } else if (newlyPressed.size == 1) {
+                                val chart = chartRef.value
+                                if (chart != null) {
+                                    val pos = newlyPressed[0].position
+                                    val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                    if (h != null) {
+                                        cursor1 = Entry(h.x, h.y)
+                                        if (!isPaused) {
+                                            cursor2 = null
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    axisLeft.apply {
-                        textColor = android.graphics.Color.WHITE
-                        setDrawGridLines(true)
-                        gridColor = android.graphics.Color.parseColor("#333333")
-                    }
-                    axisRight.isEnabled = false
-                    legend.isEnabled = false
                 }
-            },
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    LineChart(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        description.isEnabled = false
+                        setTouchEnabled(true)
+                        isDragEnabled = false
+                        setScaleEnabled(false)
+                        setPinchZoom(false)
+                        setBackgroundColor(android.graphics.Color.parseColor("#101418"))
+                        
+                        xAxis.apply {
+                            textColor = android.graphics.Color.WHITE
+                            position = XAxis.XAxisPosition.BOTTOM
+                            setDrawGridLines(true)
+                            gridColor = android.graphics.Color.parseColor("#333333")
+                            valueFormatter = object : ValueFormatter() {
+                                override fun getFormattedValue(value: Float): String {
+                                    return String.format(Locale.US, "%.1fs", value / 1000f)
+                                }
+                            }
+                        }
+                        axisLeft.apply {
+                            textColor = android.graphics.Color.WHITE
+                            setDrawGridLines(true)
+                            gridColor = android.graphics.Color.parseColor("#333333")
+                        }
+                        axisRight.isEnabled = false
+                        legend.isEnabled = false
+
+                        chartRef.value = this
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                update = { chart ->
+                    chartRef.value = chart
+                    val maxTime = if (points.isNotEmpty()) points.last().time else 0f
+                    val windowMs = timeWindowSec * 1000f
+                    val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
+
+                    val entriesX = filtered.map { Entry(it.time, it.x) }
+                    val entriesY = filtered.map { Entry(it.time, it.y) }
+                    val entriesZ = filtered.map { Entry(it.time, it.z) }
+
+                    val dataSets = mutableListOf<LineDataSet>()
+                    if (showX) {
+                        dataSets.add(LineDataSet(entriesX, "X").apply {
+                            color = android.graphics.Color.RED
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+                    if (showY) {
+                        dataSets.add(LineDataSet(entriesY, "Y").apply {
+                            color = android.graphics.Color.GREEN
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+                    if (showZ) {
+                        dataSets.add(LineDataSet(entriesZ, "Z").apply {
+                            color = android.graphics.Color.BLUE
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+
+                    val data = LineData(dataSets.map { it as ILineDataSet })
+                    chart.data = data
+
+                    if (!isPaused) {
+                        if (cursor1 != null) {
+                            chart.highlightValue(Highlight(cursor1!!.x, cursor1!!.y, 0))
+                        } else {
+                            chart.highlightValue(null)
+                        }
+                    } else {
+                        val highlights = mutableListOf<Highlight>()
+                        if (cursor1 != null) {
+                            highlights.add(Highlight(cursor1!!.x, cursor1!!.y, 0))
+                        }
+                        if (cursor2 != null) {
+                            highlights.add(Highlight(cursor2!!.x, cursor2!!.y, 0))
+                        }
+                        if (highlights.isNotEmpty()) {
+                            chart.highlightValues(highlights.toTypedArray())
+                        } else {
+                            chart.highlightValue(null)
+                        }
+                    }
+
+                    chart.notifyDataSetChanged()
+                    chart.invalidate()
+                }
+            )
+        }
+
+        // Cursor details in the space below X axis
+        val detailsContent = remember(cursor1, cursor2, isPaused) {
+            buildAnnotatedString {
+                if (!isPaused) {
+                    if (cursor1 != null) {
+                        withStyle(SpanStyle(color = Color.LightGray)) { append("Cursor: ") }
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append(String.format(Locale.US, "t = %.2fs", cursor1!!.x / 1000f)) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(String.format(Locale.US, "Y = %.2f", cursor1!!.y)) }
+                    } else {
+                        withStyle(SpanStyle(color = Color.Gray)) { append("Tap plot to inspect point (Y Cursor active)") }
+                    }
+                } else {
+                    if (cursor1 != null && cursor2 == null) {
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
+                        withStyle(SpanStyle(color = Color.White)) { append(String.format(Locale.US, "t = %.2fs, v = %.2f", cursor1!!.x / 1000f, cursor1!!.y)) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" (Tap/Touch for C2)") }
+                    } else if (cursor1 != null && cursor2 != null) {
+                        val dt = (cursor2!!.x - cursor1!!.x) / 1000f
+                        val dv = cursor2!!.y - cursor1!!.y
+                        val slope = if (dt != 0f) dv / dt else 0f
+
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
+                        append(String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y))
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        withStyle(SpanStyle(color = Color(0xFFFFAB40))) { append("C2: ") }
+                        append(String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y))
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(String.format(Locale.US, "Δt=%.2fs, Δv=%.2f", dt, dv)) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        withStyle(SpanStyle(color = Color(0xFFFF4081))) { append(String.format(Locale.US, "Slope=%.2f/s", slope)) }
+                    } else {
+                        withStyle(SpanStyle(color = Color.Gray)) { append("Paused: Tap for C1 (or 2-finger touch for C1 & C2)") }
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = detailsContent,
+            style = MaterialTheme.typography.labelSmall,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
-            update = { chart ->
-                val maxTime = if (points.isNotEmpty()) points.last().time else 0f
-                val windowMs = timeWindowSec * 1000f
-                val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
-
-                val entriesX = filtered.map { Entry(it.time, it.x) }
-                val entriesY = filtered.map { Entry(it.time, it.y) }
-                val entriesZ = filtered.map { Entry(it.time, it.z) }
-
-                val setX = LineDataSet(entriesX, "X").apply {
-                    color = android.graphics.Color.RED
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                }
-                val setY = LineDataSet(entriesY, "Y").apply {
-                    color = android.graphics.Color.GREEN
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                }
-                val setZ = LineDataSet(entriesZ, "Z").apply {
-                    color = android.graphics.Color.BLUE
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                }
-
-                val data = LineData(setX, setY, setZ)
-                chart.data = data
-                chart.notifyDataSetChanged()
-                chart.invalidate()
-            }
+                .padding(horizontal = 8.dp, vertical = 2.dp)
         )
     }
 }
 
 @Composable
-private fun LegendDot(color: Color, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+private fun ClickableLegend(color: Color, label: String, visible: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() }
+            ) { onClick() }
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Box(
             modifier = Modifier
                 .size(8.dp)
-                .background(color, CircleShape),
+                .background(if (visible) color else color.copy(alpha = 0.2f), CircleShape),
         )
         Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onBackground,
+            color = if (visible) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
         )
     }
 }
