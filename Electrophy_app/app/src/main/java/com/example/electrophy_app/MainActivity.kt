@@ -208,6 +208,20 @@ class BleViewModel : ViewModel() {
     private val _timeWindowSec = MutableStateFlow(5f)
     val timeWindowSec: StateFlow<Float> = _timeWindowSec
 
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused
+
+    fun togglePause() {
+        if (_connectionState.value != ConnectionState.Connected) return
+        val nextState = !_isPaused.value
+        _isPaused.value = nextState
+        if (nextState) {
+            sendCommand("pause")
+        } else {
+            sendCommand("resume")
+        }
+    }
+
     fun setTimeWindow(seconds: Float) {
         _timeWindowSec.value = seconds
     }
@@ -294,6 +308,7 @@ class BleViewModel : ViewModel() {
                 gatt.requestMtu(256)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _connectionState.value = ConnectionState.Disconnected
+                _isPaused.value = false
                 bluetoothGatt?.close()
                 bluetoothGatt = null
             }
@@ -383,6 +398,7 @@ class BleViewModel : ViewModel() {
 
     fun disconnect() {
         stopScan()
+        _isPaused.value = false
         bluetoothGatt?.disconnect()
         _connectionState.value = ConnectionState.Disconnected
     }
@@ -466,6 +482,7 @@ class BleViewModel : ViewModel() {
 
     fun clearLogs() {
         _logMessages.value = emptyList()
+        _chartData.value = ChartData()
         resetSession()
         pendingData = ""
     }
@@ -547,6 +564,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val highGRange by viewModel.highGRange.collectAsState()
     val gyroRange by viewModel.gyroRange.collectAsState()
     val timeWindowSec by viewModel.timeWindowSec.collectAsState()
+    val isPaused by viewModel.isPaused.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -634,6 +652,16 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                     Text(if (connectionState == ConnectionState.Disconnected) "Connect" else "Disconnect")
                 }
 
+                Button(
+                    onClick = { viewModel.togglePause() },
+                    enabled = connectionState == ConnectionState.Connected,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isPaused) Color(0xFFFFA000) else MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text(if (isPaused) "Resume" else "Pause")
+                }
+
                 Button(onClick = { viewModel.clearLogs() }) {
                     Text("Clear")
                 }
@@ -713,7 +741,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                 )
@@ -721,8 +749,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text(
                         text = "Sampling Rate (ODR) & Time Window",
@@ -735,7 +763,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Box(modifier = Modifier.weight(1f)) {
-                            OdrDropdown(
+                            CompactOdrDropdown(
                                 title = "Low-G",
                                 options = lowGOdrOptions,
                                 selectedSuffix = lowGOdr,
@@ -744,7 +772,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                             )
                         }
                         Box(modifier = Modifier.weight(1f)) {
-                            OdrDropdown(
+                            CompactOdrDropdown(
                                 title = "High-G",
                                 options = highGOdrOptions,
                                 selectedSuffix = highGOdr,
@@ -758,7 +786,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Box(modifier = Modifier.weight(1f)) {
-                            OdrDropdown(
+                            CompactOdrDropdown(
                                 title = "Gyro",
                                 options = gyroOdrOptions,
                                 selectedSuffix = gyroOdr,
@@ -767,8 +795,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                             )
                         }
                         Box(modifier = Modifier.weight(1f)) {
-                            TimeWindowDropdown(
-                                title = "Time Window",
+                            CompactTimeWindowDropdown(
+                                title = "Window",
                                 options = timeWindowOptions,
                                 selectedSeconds = timeWindowSec,
                                 onSelected = { viewModel.setTimeWindow(it) }
@@ -782,7 +810,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                 )
@@ -790,8 +818,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text(
                         text = "Full-Scale Range",
@@ -804,8 +832,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Box(modifier = Modifier.weight(1f)) {
-                            RangeDropdown(
-                                title = "Low-G Range",
+                            CompactRangeDropdown(
+                                title = "Low-G",
                                 options = lowGRangeOptions,
                                 selectedSuffix = lowGRange,
                                 enabled = true,
@@ -813,8 +841,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                             )
                         }
                         Box(modifier = Modifier.weight(1f)) {
-                            RangeDropdown(
-                                title = "High-G Range",
+                            CompactRangeDropdown(
+                                title = "High-G",
                                 options = highGRangeOptions,
                                 selectedSuffix = highGRange,
                                 enabled = true,
@@ -827,8 +855,8 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Box(modifier = Modifier.weight(1f)) {
-                            RangeDropdown(
-                                title = "Gyro Range",
+                            CompactRangeDropdown(
+                                title = "Gyro",
                                 options = gyroRangeOptions,
                                 selectedSuffix = gyroRange,
                                 enabled = true,
@@ -840,34 +868,65 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 }
             }
 
-            // Console
-            val listState = rememberLazyListState()
-            LaunchedEffect(logMessages.size) {
-                if (logMessages.isNotEmpty()) {
-                    listState.animateScrollToItem(logMessages.size - 1)
+            // Collapsible Terminal Section
+            var isTerminalVisible by remember { mutableStateOf(false) }
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .clickable { isTerminalVisible = !isTerminalVisible },
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isTerminalVisible) "Received Data Terminal ▼" else "Received Data Terminal ▲",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "${logMessages.size} lines",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .weight(0.9f)
-                    .fillMaxWidth()
-                    .padding(8.dp)
-                    .background(Color.Black)
-            ) {
-                LazyColumn(
-                    state = listState,
+            if (isTerminalVisible) {
+                val listState = rememberLazyListState()
+                LaunchedEffect(logMessages.size) {
+                    if (logMessages.isNotEmpty()) {
+                        listState.animateScrollToItem(logMessages.size - 1)
+                    }
+                }
+
+                Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(8.dp)
+                        .height(80.dp)
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                        .background(Color.Black)
                 ) {
-                    items(logMessages) { msg ->
-                        Text(
-                            text = msg,
-                            color = Color.Green,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
-                        )
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(4.dp)
+                    ) {
+                        items(logMessages) { msg ->
+                            Text(
+                                text = msg,
+                                color = Color.Green,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
             }
@@ -995,7 +1054,7 @@ private fun LegendDot(color: Color, label: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun OdrDropdown(
+private fun CompactOdrDropdown(
     title: String,
     options: List<OdrOption>,
     selectedSuffix: String,
@@ -1005,23 +1064,28 @@ private fun OdrDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selectedOption = options.find { it.suffix == selectedSuffix } ?: options.first()
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(bottom = 1.dp)
+            modifier = Modifier.width(55.dp)
         )
         ExposedDropdownMenuBox(
             expanded = expanded,
-            onExpandedChange = { if (enabled) expanded = !expanded }
+            onExpandedChange = { if (enabled) expanded = !expanded },
+            modifier = Modifier.weight(1f)
         ) {
             OutlinedTextField(
                 value = selectedOption.label,
                 onValueChange = {},
                 readOnly = true,
                 enabled = enabled,
-                textStyle = MaterialTheme.typography.bodyMedium,
+                textStyle = MaterialTheme.typography.bodySmall,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 colors = OutlinedTextFieldDefaults.colors(
                     disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
@@ -1029,7 +1093,6 @@ private fun OdrDropdown(
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
-                    .height(48.dp)
                     .pointerInput(enabled) {
                         detectTapGestures(
                             onTap = {
@@ -1047,7 +1110,7 @@ private fun OdrDropdown(
             ) {
                 options.forEach { option ->
                     DropdownMenuItem(
-                        text = { Text(option.label) },
+                        text = { Text(option.label, style = MaterialTheme.typography.bodySmall) },
                         onClick = {
                             onSelected(option.suffix)
                             expanded = false
@@ -1061,7 +1124,7 @@ private fun OdrDropdown(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TimeWindowDropdown(
+private fun CompactTimeWindowDropdown(
     title: String,
     options: List<TimeWindowOption>,
     selectedSeconds: Float,
@@ -1070,29 +1133,33 @@ private fun TimeWindowDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selectedOption = options.find { it.seconds == selectedSeconds } ?: options[2]
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(bottom = 1.dp)
+            modifier = Modifier.width(55.dp)
         )
         ExposedDropdownMenuBox(
             expanded = expanded,
-            onExpandedChange = { expanded = !expanded }
+            onExpandedChange = { expanded = !expanded },
+            modifier = Modifier.weight(1f)
         ) {
             OutlinedTextField(
                 value = selectedOption.label,
                 onValueChange = {},
                 readOnly = true,
                 enabled = true,
-                textStyle = MaterialTheme.typography.bodyMedium,
+                textStyle = MaterialTheme.typography.bodySmall,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 colors = OutlinedTextFieldDefaults.colors(),
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
-                    .height(48.dp)
                     .pointerInput(Unit) {
                         detectTapGestures(
                             onTap = {
@@ -1108,7 +1175,7 @@ private fun TimeWindowDropdown(
             ) {
                 options.forEach { option ->
                     DropdownMenuItem(
-                        text = { Text(option.label) },
+                        text = { Text(option.label, style = MaterialTheme.typography.bodySmall) },
                         onClick = {
                             onSelected(option.seconds)
                             expanded = false
@@ -1122,7 +1189,7 @@ private fun TimeWindowDropdown(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RangeDropdown(
+private fun CompactRangeDropdown(
     title: String,
     options: List<RangeOption>,
     selectedSuffix: String,
@@ -1132,23 +1199,28 @@ private fun RangeDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selectedOption = options.find { it.suffix == selectedSuffix } ?: options.first()
 
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(bottom = 1.dp)
+            modifier = Modifier.width(55.dp)
         )
         ExposedDropdownMenuBox(
             expanded = expanded,
-            onExpandedChange = { if (enabled) expanded = !expanded }
+            onExpandedChange = { if (enabled) expanded = !expanded },
+            modifier = Modifier.weight(1f)
         ) {
             OutlinedTextField(
                 value = selectedOption.label,
                 onValueChange = {},
                 readOnly = true,
                 enabled = enabled,
-                textStyle = MaterialTheme.typography.bodyMedium,
+                textStyle = MaterialTheme.typography.bodySmall,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 colors = OutlinedTextFieldDefaults.colors(
                     disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
@@ -1156,7 +1228,6 @@ private fun RangeDropdown(
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
-                    .height(48.dp)
                     .pointerInput(enabled) {
                         detectTapGestures(
                             onTap = {
@@ -1174,7 +1245,7 @@ private fun RangeDropdown(
             ) {
                 options.forEach { option ->
                     DropdownMenuItem(
-                        text = { Text(option.label) },
+                        text = { Text(option.label, style = MaterialTheme.typography.bodySmall) },
                         onClick = {
                             onSelected(option.suffix)
                             expanded = false

@@ -103,6 +103,7 @@ typedef enum {
 } stream_mode_t;
 
 static volatile stream_mode_t current_stream_mode = STREAM_MODE_ALL;
+static volatile bool          g_data_paused       = false;
 
 /* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
 /* Current output data-rate (Hz) for each sensing path; 0 = power-down.
@@ -345,8 +346,16 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 
         ESP_LOGI(TAG_BLE, "Received command: \"%s\"", cmd);
 
+        /* ── Pause / Resume commands ──────────────────────────────────── */
+        if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
+            g_data_paused = true;
+            ESP_LOGI(TAG_BLE, "Data reading and sending PAUSED");
+        } else if (strcasecmp(cmd, "resume") == 0 || strcasecmp(cmd, "start") == 0 || strcasecmp(cmd, "play") == 0) {
+            g_data_paused = false;
+            ESP_LOGI(TAG_BLE, "Data reading and sending RESUMED");
+
         /* ── Stream-mode commands ──────────────────────────────────────── */
-        if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
+        } else if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
             current_stream_mode = STREAM_MODE_LOW_ACC;
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
@@ -561,6 +570,7 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         } else {
             ESP_LOGW(TAG_BLE,
                      "Unknown command \"%s\".\n"
+                     "  Control:      pause | resume (or stop | start)\n"
                      "  Stream:       low_acc | high_acc | both_acc | only_gyro | all\n"
                      "  Low-G ODR:    odr_low_g_{off|1hz875|7hz5|15hz|30hz|60hz|120hz|240hz|480hz|960hz|1920hz|3840hz|7680hz}\n"
                      "  High-G ODR:   odr_high_g_{off|480hz|960hz|1920hz|3840hz|7680hz}\n"
@@ -862,6 +872,14 @@ static void sensor_task(void *arg)
             lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
             ulTaskNotifyTake(pdTRUE, 0);
             ESP_LOGI(TAG, "BLE connected — starting sensor data stream.");
+        }
+
+        /* ── Gate: paused by command ──────────────────────────────────── */
+        if (g_data_paused) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            /* Clear any accumulated notification so resuming starts cleanly */
+            ulTaskNotifyTake(pdTRUE, 0);
+            continue;
         }
 
         /* ── Wait for INT1 data-ready interrupt ───────────────────────── */
