@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
@@ -91,6 +92,7 @@ enum class GraphMode(val label: String, val command: String) {
 }
 
 private const val MAX_CHART_POINTS = 1500
+private const val SAMPLE_RATE_UPDATE_INTERVAL_MS = 2_000L
 
 data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
 
@@ -185,15 +187,23 @@ class BleViewModel : ViewModel() {
     private var sessionStartTimeMs = System.currentTimeMillis()
     private var lastAssignedTimeMs = 0L
     private var lastTerminalUpdateTimeMs = 0L
+    private var sampleRateWindowStartMs = SystemClock.elapsedRealtime()
+    private var samplesInRateWindow = 0
 
     private fun resetSession() {
         sessionStartTimeMs = System.currentTimeMillis()
         lastAssignedTimeMs = 0L
         lastTerminalUpdateTimeMs = 0L
+        sampleRateWindowStartMs = SystemClock.elapsedRealtime()
+        samplesInRateWindow = 0
+        _receivedSamplesPerSecond.value = 0
     }
 
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages
+
+    private val _receivedSamplesPerSecond = MutableStateFlow(0)
+    val receivedSamplesPerSecond: StateFlow<Int> = _receivedSamplesPerSecond
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording
@@ -488,6 +498,7 @@ class BleViewModel : ViewModel() {
         }
 
         appendBatchPoints(lowGList, highGList, gyroList)
+        recordReceivedSamples(maxOf(lowGList.size, highGList.size, gyroList.size))
 
         // Human-readable terminal update (throttled to ~10 Hz to prevent UI thread lag)
         val now = System.currentTimeMillis()
@@ -619,7 +630,8 @@ class BleViewModel : ViewModel() {
             pendingData = lines.last()
             val completeLines = lines.dropLast(1)
 
-            completeLines.forEach { line -> processIncomingLine(line) }
+            val receivedSampleCount = completeLines.count { line -> processIncomingLine(line) }
+            recordReceivedSamples(receivedSampleCount)
 
             _logMessages.update { current ->
                 val updated = current.toMutableList()
@@ -646,16 +658,45 @@ class BleViewModel : ViewModel() {
         sendCommand(mode.command + "\r\n")
     }
 
-    private fun processIncomingLine(rawLine: String) {
+    private fun processIncomingLine(rawLine: String): Boolean {
         val line = rawLine.trim()
-        if (line.isEmpty()) return
+        if (line.isEmpty()) return false
 
         val points = parseXyzPoints(line)
-        when (_selectedMode.value) {
-            GraphMode.LOW_G -> if (points.isNotEmpty()) appendPoints(lowG = points.first())
-            GraphMode.HIGH_G -> if (points.isNotEmpty()) appendPoints(highG = points.first())
-            GraphMode.GYRO -> if (points.isNotEmpty()) appendPoints(gyro = points.first())
-            GraphMode.BOTH_ACC -> if (points.size >= 2) appendPoints(lowG = points[0], highG = points[1])
+        return when (_selectedMode.value) {
+            GraphMode.LOW_G -> points.firstOrNull()?.let {
+                appendPoints(lowG = it)
+                true
+            } ?: false
+            GraphMode.HIGH_G -> points.firstOrNull()?.let {
+                appendPoints(highG = it)
+                true
+            } ?: false
+            GraphMode.GYRO -> points.firstOrNull()?.let {
+                appendPoints(gyro = it)
+                true
+            } ?: false
+            GraphMode.BOTH_ACC -> if (points.size >= 2) {
+                appendPoints(lowG = points[0], highG = points[1])
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /** Updates the UI only once per two-second window, keeping the receive path lightweight. */
+    private fun recordReceivedSamples(sampleCount: Int) {
+        if (sampleCount <= 0) return
+
+        samplesInRateWindow += sampleCount
+        val nowMs = SystemClock.elapsedRealtime()
+        val elapsedMs = nowMs - sampleRateWindowStartMs
+        if (elapsedMs >= SAMPLE_RATE_UPDATE_INTERVAL_MS) {
+            _receivedSamplesPerSecond.value =
+                ((samplesInRateWindow * 1_000L) / elapsedMs).toInt()
+            samplesInRateWindow = 0
+            sampleRateWindowStartMs = nowMs
         }
     }
 
@@ -762,6 +803,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
 
     val connectionState by viewModel.connectionState.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
+    val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val chartData by viewModel.chartData.collectAsState()
@@ -1104,11 +1146,18 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    Text(
-                        text = "${logMessages.size} lines",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "$receivedSamplesPerSecond samples/s",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "${logMessages.size} lines",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
