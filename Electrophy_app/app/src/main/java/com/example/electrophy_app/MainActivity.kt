@@ -54,6 +54,7 @@ import java.io.File
 import java.util.UUID
 import java.util.Locale
 import android.view.ViewGroup
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
@@ -1051,7 +1052,6 @@ private fun LegendDot(color: Color, label: String) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactOdrDropdown(
     title: String,
@@ -1074,36 +1074,46 @@ private fun CompactOdrDropdown(
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.width(55.dp)
         )
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { if (enabled) expanded = !expanded },
-            modifier = Modifier.weight(1f)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .wrapContentSize(Alignment.TopStart)
         ) {
-            OutlinedTextField(
-                value = selectedOption.label,
-                onValueChange = {},
-                readOnly = true,
+            Surface(
+                onClick = { if (enabled) expanded = !expanded },
                 enabled = enabled,
-                textStyle = MaterialTheme.typography.bodySmall,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
-                ),
                 modifier = Modifier
-                    .menuAnchor()
                     .fillMaxWidth()
-                    .pointerInput(enabled) {
-                        detectTapGestures(
-                            onTap = {
-                                if (enabled) {
-                                    expanded = !expanded
-                                }
-                            }
-                        )
-                    },
-                singleLine = true
-            )
-            ExposedDropdownMenu(
+                    .height(38.dp),
+                shape = MaterialTheme.shapes.extraSmall,
+                color = if (enabled) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f),
+                border = BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = selectedOption.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        maxLines = 1
+                    )
+                    Text(
+                        text = "▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    )
+                }
+            }
+
+            DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
@@ -1121,7 +1131,6 @@ private fun CompactOdrDropdown(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactTimeWindowDropdown(
     title: String,
@@ -1143,32 +1152,46 @@ private fun CompactTimeWindowDropdown(
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.width(55.dp)
         )
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = !expanded },
-            modifier = Modifier.weight(1f)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .wrapContentSize(Alignment.TopStart)
         ) {
-            OutlinedTextField(
-                value = selectedOption.label,
-                onValueChange = {},
-                readOnly = true,
+            Surface(
+                onClick = { expanded = !expanded },
                 enabled = true,
-                textStyle = MaterialTheme.typography.bodySmall,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = OutlinedTextFieldDefaults.colors(),
                 modifier = Modifier
-                    .menuAnchor()
                     .fillMaxWidth()
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onTap = {
-                                expanded = !expanded
-                            }
-                        )
-                    },
-                singleLine = true
-            )
-            ExposedDropdownMenu(
+                    .height(38.dp),
+                shape = MaterialTheme.shapes.extraSmall,
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = selectedOption.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = "▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
@@ -1186,7 +1209,6 @@ private fun CompactTimeWindowDropdown(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactRangeDropdown(
     title: String,
@@ -1209,36 +1231,46 @@ private fun CompactRangeDropdown(
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.width(55.dp)
         )
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { if (enabled) expanded = !expanded },
-            modifier = Modifier.weight(1f)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .wrapContentSize(Alignment.TopStart)
         ) {
-            OutlinedTextField(
-                value = selectedOption.label,
-                onValueChange = {},
-                readOnly = true,
+            Surface(
+                onClick = { if (enabled) expanded = !expanded },
                 enabled = enabled,
-                textStyle = MaterialTheme.typography.bodySmall,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
-                ),
                 modifier = Modifier
-                    .menuAnchor()
                     .fillMaxWidth()
-                    .pointerInput(enabled) {
-                        detectTapGestures(
-                            onTap = {
-                                if (enabled) {
-                                    expanded = !expanded
-                                }
-                            }
-                        )
-                    },
-                singleLine = true
-            )
-            ExposedDropdownMenu(
+                    .height(38.dp),
+                shape = MaterialTheme.shapes.extraSmall,
+                color = if (enabled) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f),
+                border = BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = selectedOption.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        maxLines = 1
+                    )
+                    Text(
+                        text = "▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    )
+                }
+            }
+
+            DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
