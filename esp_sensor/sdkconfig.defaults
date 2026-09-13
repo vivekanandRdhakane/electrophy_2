@@ -8,4 +8,6 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 CONFIG_BT_CONTROLLER_ENABLED=y
 # Increase ATT MTU so multi-channel ASCII string fits in one notification packet
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
+# Reduce NimBLE log verbosity to prevent notification flooding
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 

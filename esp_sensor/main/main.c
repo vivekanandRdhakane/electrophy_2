@@ -752,6 +752,9 @@ static void nimble_host_task(void *param)
 /* ── BLE: full stack initialisation ──────────────────────────────────────── */
 static void ble_stack_init(void)
 {
+    /* Suppress verbose NimBLE procedure logs (e.g. notify procedure initiation on every packet) */
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+
     /* Create event group for BLE connection state */
     ble_event_group = xEventGroupCreate();
     assert(ble_event_group != NULL);
@@ -959,8 +962,8 @@ static void sensor_task(void *arg)
             strncpy(latest_ble_str, ble_str, sizeof(latest_ble_str) - 1);
             latest_ble_str[sizeof(latest_ble_str) - 1] = '\0';
 
-            /* Serial output */
-            ESP_LOGI(TAG, "%s", ble_str);
+            /* Serial output (debug level to prevent terminal flooding) */
+            ESP_LOGD(TAG, "%s", ble_str);
 
             /* BLE notification (ASCII string — readable directly in nRF Connect) */
             imu_notify_str(ble_str);
@@ -972,6 +975,7 @@ static void sensor_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== ESP_IMU starting ===");
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
 
     /* Start BLE stack first — it runs in its own NimBLE host task */
     ble_stack_init();
