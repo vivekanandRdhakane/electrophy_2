@@ -42,6 +42,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.SpanStyle
@@ -892,6 +895,10 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val isPaused by viewModel.isPaused.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
 
+    var showPlotInfoDialog by remember { mutableStateOf(false) }
+    var showOdrInfoDialog by remember { mutableStateOf(false) }
+    var showRangeInfoDialog by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -1006,17 +1013,26 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                GraphMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = selectedMode == mode,
-                        onClick = { viewModel.selectMode(mode) },
-                        label = { Text(mode.label) },
-                    )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GraphMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = selectedMode == mode,
+                            onClick = { viewModel.selectMode(mode) },
+                            label = { Text(mode.label) },
+                        )
+                    }
                 }
+                Spacer(modifier = Modifier.width(6.dp))
+                InfoIconButton(onClick = { showPlotInfoDialog = true })
             }
 
             // Real-time chart
@@ -1083,12 +1099,20 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         .padding(6.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = "Sampling Rate (ODR) & Time Window",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Sampling Rate (ODR) & Time Window",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        InfoIconButton(onClick = { showOdrInfoDialog = true })
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1152,12 +1176,20 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         .padding(6.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = "Full-Scale Range",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Full-Scale Range",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        InfoIconButton(onClick = { showRangeInfoDialog = true })
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1197,6 +1229,44 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         Spacer(modifier = Modifier.weight(1f))
                     }
                 }
+            }
+
+            // Info Dialogs
+            if (showPlotInfoDialog) {
+                InfoAlertDialog(
+                    title = "Plot & Sensor Modes",
+                    infoText = "• Graph Modes: Select between Low-G Accelerometer (mg), High-G Accelerometer (g), Both Accelerometers, or Gyroscope (mdps).\n\n" +
+                            "• Channel Toggles: Tap X, Y, or Z in the chart header legend to show or hide individual axis channels.\n\n" +
+                            "• Interactive Cursors:\n" +
+                            "  - Single Tap: Places Cursor 1 (C1) to inspect real-time values.\n" +
+                            "  - Dual Touch (when Paused): Places C1 and C2 to measure time delta (Δt), amplitude delta (Δv), and slope.",
+                    onDismiss = { showPlotInfoDialog = false }
+                )
+            }
+
+            if (showOdrInfoDialog) {
+                InfoAlertDialog(
+                    title = "Sampling Rate (ODR) & Window",
+                    infoText = "• Output Data Rate (ODR):\n" +
+                            "  - Low-G Accel: 1.875 Hz to 7680 Hz\n" +
+                            "  - High-G Accel: 480 Hz to 7680 Hz\n" +
+                            "  - Gyroscope: 7.5 Hz to 7680 Hz\n" +
+                            "Higher ODR rates capture faster dynamics but transmit more sample data over BLE.\n\n" +
+                            "• Display Time Window: Controls horizontal chart duration (1s to 30s).",
+                    onDismiss = { showOdrInfoDialog = false }
+                )
+            }
+
+            if (showRangeInfoDialog) {
+                InfoAlertDialog(
+                    title = "Full-Scale Range",
+                    infoText = "• Full-Scale Range (FS) sets the measurement ceiling:\n" +
+                            "  - Low-G Range: ±2 g, ±4 g, ±8 g, ±16 g\n" +
+                            "  - High-G Range: ±32 g, ±64 g, ±128 g, ±256 g, ±320 g\n" +
+                            "  - Gyroscope Range: ±250 dps, ±500 dps, ±1000 dps, ±2000 dps, ±4000 dps\n\n" +
+                            "• Lower ranges give finer measurement resolution, while higher ranges prevent signal clipping under heavy vibration or rapid motion.",
+                    onDismiss = { showRangeInfoDialog = false }
+                )
             }
 
             // Collapsible Terminal Section
@@ -1762,3 +1832,80 @@ private fun CompactRangeDropdown(
         }
     }
 }
+
+@Composable
+private fun InfoIconButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(20.dp)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), CircleShape)
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "i",
+            style = TextStyle(
+                fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Bold,
+                fontStyle = FontStyle.Italic,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        )
+    }
+}
+
+@Composable
+private fun InfoAlertDialog(
+    title: String,
+    infoText: String,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f), CircleShape)
+                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "i",
+                        style = TextStyle(
+                            fontFamily = FontFamily.Serif,
+                            fontWeight = FontWeight.Bold,
+                            fontStyle = FontStyle.Italic,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        },
+        text = {
+            Text(
+                text = infoText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Got it")
+            }
+        }
+    )
+}
+
