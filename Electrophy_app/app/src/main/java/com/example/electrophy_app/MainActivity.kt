@@ -1113,49 +1113,118 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         )
                         InfoIconButton(onClick = { showOdrInfoDialog = true })
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactOdrDropdown(
-                                title = "Low-G",
-                                options = lowGOdrOptions,
-                                selectedSuffix = lowGOdr,
-                                enabled = true,
-                                onSelected = { viewModel.setLowGOdr(it) }
-                            )
+
+                    when (selectedMode) {
+                        GraphMode.LOW_G -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactOdrDropdown(
+                                        title = "Low-G",
+                                        options = lowGOdrOptions,
+                                        selectedSuffix = lowGOdr,
+                                        enabled = true,
+                                        onSelected = { viewModel.setLowGOdr(it) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactTimeWindowDropdown(
+                                        title = "Window",
+                                        options = timeWindowOptions,
+                                        selectedSeconds = timeWindowSec,
+                                        onSelected = { viewModel.setTimeWindow(it) }
+                                    )
+                                }
+                            }
                         }
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactOdrDropdown(
-                                title = "High-G",
-                                options = highGOdrOptions,
-                                selectedSuffix = highGOdr,
-                                enabled = true,
-                                onSelected = { viewModel.setHighGOdr(it) }
-                            )
+                        GraphMode.HIGH_G -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactOdrDropdown(
+                                        title = "High-G",
+                                        options = highGOdrOptions,
+                                        selectedSuffix = highGOdr,
+                                        enabled = true,
+                                        onSelected = { viewModel.setHighGOdr(it) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactTimeWindowDropdown(
+                                        title = "Window",
+                                        options = timeWindowOptions,
+                                        selectedSeconds = timeWindowSec,
+                                        onSelected = { viewModel.setTimeWindow(it) }
+                                    )
+                                }
+                            }
                         }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactOdrDropdown(
-                                title = "Gyro",
-                                options = gyroOdrOptions,
-                                selectedSuffix = gyroOdr,
-                                enabled = true,
-                                onSelected = { viewModel.setGyroOdr(it) }
-                            )
+                        GraphMode.GYRO -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactOdrDropdown(
+                                        title = "Gyro",
+                                        options = gyroOdrOptions,
+                                        selectedSuffix = gyroOdr,
+                                        enabled = true,
+                                        onSelected = { viewModel.setGyroOdr(it) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactTimeWindowDropdown(
+                                        title = "Window",
+                                        options = timeWindowOptions,
+                                        selectedSeconds = timeWindowSec,
+                                        onSelected = { viewModel.setTimeWindow(it) }
+                                    )
+                                }
+                            }
                         }
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactTimeWindowDropdown(
-                                title = "Window",
-                                options = timeWindowOptions,
-                                selectedSeconds = timeWindowSec,
-                                onSelected = { viewModel.setTimeWindow(it) }
-                            )
+                        GraphMode.BOTH_ACC -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactOdrDropdown(
+                                        title = "Low-G",
+                                        options = lowGOdrOptions,
+                                        selectedSuffix = lowGOdr,
+                                        enabled = true,
+                                        onSelected = { viewModel.setLowGOdr(it) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactOdrDropdown(
+                                        title = "High-G",
+                                        options = highGOdrOptions,
+                                        selectedSuffix = highGOdr,
+                                        enabled = true,
+                                        onSelected = { viewModel.setHighGOdr(it) }
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactTimeWindowDropdown(
+                                        title = "Window",
+                                        options = timeWindowOptions,
+                                        selectedSeconds = timeWindowSec,
+                                        onSelected = { viewModel.setTimeWindow(it) }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
                     }
                 }
@@ -1190,43 +1259,84 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                         )
                         InfoIconButton(onClick = { showRangeInfoDialog = true })
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactRangeDropdown(
-                                title = "Low-G",
-                                options = lowGRangeOptions,
-                                selectedSuffix = lowGRange,
-                                enabled = true,
-                                onSelected = { viewModel.setLowGRange(it) }
-                            )
+
+                    when (selectedMode) {
+                        GraphMode.LOW_G -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactRangeDropdown(
+                                        title = "Low-G",
+                                        options = lowGRangeOptions,
+                                        selectedSuffix = lowGRange,
+                                        enabled = true,
+                                        onSelected = { viewModel.setLowGRange(it) }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactRangeDropdown(
-                                title = "High-G",
-                                options = highGRangeOptions,
-                                selectedSuffix = highGRange,
-                                enabled = true,
-                                onSelected = { viewModel.setHighGRange(it) }
-                            )
+                        GraphMode.HIGH_G -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactRangeDropdown(
+                                        title = "High-G",
+                                        options = highGRangeOptions,
+                                        selectedSuffix = highGRange,
+                                        enabled = true,
+                                        onSelected = { viewModel.setHighGRange(it) }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            CompactRangeDropdown(
-                                title = "Gyro",
-                                options = gyroRangeOptions,
-                                selectedSuffix = gyroRange,
-                                enabled = true,
-                                onSelected = { viewModel.setGyroRange(it) }
-                            )
+                        GraphMode.GYRO -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactRangeDropdown(
+                                        title = "Gyro",
+                                        options = gyroRangeOptions,
+                                        selectedSuffix = gyroRange,
+                                        enabled = true,
+                                        onSelected = { viewModel.setGyroRange(it) }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
-                        Spacer(modifier = Modifier.weight(1f))
+                        GraphMode.BOTH_ACC -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactRangeDropdown(
+                                        title = "Low-G",
+                                        options = lowGRangeOptions,
+                                        selectedSuffix = lowGRange,
+                                        enabled = true,
+                                        onSelected = { viewModel.setLowGRange(it) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CompactRangeDropdown(
+                                        title = "High-G",
+                                        options = highGRangeOptions,
+                                        selectedSuffix = highGRange,
+                                        enabled = true,
+                                        onSelected = { viewModel.setHighGRange(it) }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
