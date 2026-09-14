@@ -231,6 +231,103 @@ class BleViewModel : ViewModel() {
         sampleRateWindowStartMs = SystemClock.elapsedRealtime()
         samplesInRateWindow = 0
         _receivedSamplesPerSecond.value = 0
+        resetFilterState()
+    }
+
+    private val _isFilterEnabled = MutableStateFlow(false)
+    val isFilterEnabled: StateFlow<Boolean> = _isFilterEnabled
+
+    private val _filterAlpha = MutableStateFlow(0.2f)
+    val filterAlpha: StateFlow<Float> = _filterAlpha
+
+    fun setFilterEnabled(enabled: Boolean) {
+        _isFilterEnabled.value = enabled
+        resetFilterState()
+    }
+
+    fun setFilterAlpha(alpha: Float) {
+        _filterAlpha.value = alpha.coerceIn(0f, 1f)
+    }
+
+    private var prevLowGX = 0f; private var prevLowGY = 0f; private var prevLowGZ = 0f; private var hasPrevLowG = false
+    private var prevHighGX = 0f; private var prevHighGY = 0f; private var prevHighGZ = 0f; private var hasPrevHighG = false
+    private var prevGyroX = 0f; private var prevGyroY = 0f; private var prevGyroZ = 0f; private var hasPrevGyro = false
+
+    private fun resetFilterState() {
+        hasPrevLowG = false
+        hasPrevHighG = false
+        hasPrevGyro = false
+    }
+
+    private fun filterLowG(points: List<AxisPoint>): List<AxisPoint> {
+        if (!_isFilterEnabled.value) return points
+        val alpha = _filterAlpha.value
+        return points.map { pt ->
+            val fx = if (!hasPrevLowG) { prevLowGX = pt.x; prevLowGY = pt.y; prevLowGZ = pt.z; hasPrevLowG = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevLowGX }.also { prevLowGX = it }
+            val fy = (alpha * pt.y + (1f - alpha) * prevLowGY).also { prevLowGY = it }
+            val fz = (alpha * pt.z + (1f - alpha) * prevLowGZ).also { prevLowGZ = it }
+            AxisPoint(fx, fy, fz, pt.time)
+        }
+    }
+
+    private fun filterHighG(points: List<AxisPoint>): List<AxisPoint> {
+        if (!_isFilterEnabled.value) return points
+        val alpha = _filterAlpha.value
+        return points.map { pt ->
+            val fx = if (!hasPrevHighG) { prevHighGX = pt.x; prevHighGY = pt.y; prevHighGZ = pt.z; hasPrevHighG = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevHighGX }.also { prevHighGX = it }
+            val fy = (alpha * pt.y + (1f - alpha) * prevHighGY).also { prevHighGY = it }
+            val fz = (alpha * pt.z + (1f - alpha) * prevHighGZ).also { prevHighGZ = it }
+            AxisPoint(fx, fy, fz, pt.time)
+        }
+    }
+
+    private fun filterGyro(points: List<AxisPoint>): List<AxisPoint> {
+        if (!_isFilterEnabled.value) return points
+        val alpha = _filterAlpha.value
+        return points.map { pt ->
+            val fx = if (!hasPrevGyro) { prevGyroX = pt.x; prevGyroY = pt.y; prevGyroZ = pt.z; hasPrevGyro = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevGyroX }.also { prevGyroX = it }
+            val fy = (alpha * pt.y + (1f - alpha) * prevGyroY).also { prevGyroY = it }
+            val fz = (alpha * pt.z + (1f - alpha) * prevGyroZ).also { prevGyroZ = it }
+            AxisPoint(fx, fy, fz, pt.time)
+        }
+    }
+
+    private fun parseOdrToHz(odrSuffix: String): Float {
+        return when (odrSuffix) {
+            "off" -> 0f
+            "1hz875" -> 1.875f
+            "7hz5" -> 7.5f
+            "15hz" -> 15f
+            "30hz" -> 30f
+            "60hz" -> 60f
+            "120hz" -> 120f
+            "240hz" -> 240f
+            "480hz" -> 480f
+            "960hz" -> 960f
+            "1920hz" -> 1920f
+            "3840hz" -> 3840f
+            "7680hz" -> 7680f
+            else -> 15f
+        }
+    }
+
+    private fun calculateCutoffFrequency(fs: Float, alpha: Float): Float {
+        if (fs <= 0f || alpha >= 1f || alpha <= 0f) return 0f
+        return (alpha * fs) / (2f * Math.PI.toFloat() * (1f - alpha))
+    }
+
+    fun getCalculatedCutoffFrequency(): Float {
+        val fs = when (_selectedMode.value) {
+            GraphMode.LOW_G -> parseOdrToHz(_lowGOdr.value)
+            GraphMode.HIGH_G -> parseOdrToHz(_highGOdr.value)
+            GraphMode.GYRO -> parseOdrToHz(_gyroOdr.value)
+            GraphMode.BOTH_ACC -> {
+                val f1 = parseOdrToHz(_lowGOdr.value)
+                val f2 = parseOdrToHz(_highGOdr.value)
+                if (f1 > 0f && f2 > 0f) minOf(f1, f2) else maxOf(f1, f2)
+            }
+        }
+        return calculateCutoffFrequency(fs, _filterAlpha.value)
     }
 
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
@@ -568,8 +665,12 @@ class BleViewModel : ViewModel() {
             }
         }
 
-        appendBatchPoints(lowGList, highGList, gyroList)
-        recordReceivedSamples(maxOf(lowGList.size, highGList.size, gyroList.size))
+        val filteredLowG = filterLowG(lowGList)
+        val filteredHighG = filterHighG(highGList)
+        val filteredGyro = filterGyro(gyroList)
+
+        appendBatchPoints(filteredLowG, filteredHighG, filteredGyro)
+        recordReceivedSamples(maxOf(filteredLowG.size, filteredHighG.size, filteredGyro.size))
 
         // Human-readable terminal update (throttled to ~10 Hz to prevent UI thread lag)
         val now = System.currentTimeMillis()
@@ -577,28 +678,28 @@ class BleViewModel : ViewModel() {
             lastTerminalUpdateTimeMs = now
             val terminalLine = when (mode) {
                 1 -> {
-                    val pt = lowGList.lastOrNull()
+                    val pt = filteredLowG.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f", pt.x, pt.y, pt.z) else null
                 }
                 2 -> {
-                    val pt = highGList.lastOrNull()
+                    val pt = filteredHighG.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[High-G g] X=%6.2f Y=%6.2f Z=%6.2f", pt.x, pt.y, pt.z) else null
                 }
                 3 -> {
-                    val lg = lowGList.lastOrNull()
-                    val hg = highGList.lastOrNull()
+                    val lg = filteredLowG.lastOrNull()
+                    val hg = filteredHighG.lastOrNull()
                     if (lg != null && hg != null) {
                         String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f", lg.x, lg.y, lg.z, hg.x, hg.y, hg.z)
                     } else null
                 }
                 4 -> {
-                    val pt = gyroList.lastOrNull()
+                    val pt = filteredGyro.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[mdps] X=%8.2f Y=%8.2f Z=%8.2f", pt.x, pt.y, pt.z) else null
                 }
                 0 -> {
-                    val lg = lowGList.lastOrNull()
-                    val hg = highGList.lastOrNull()
-                    val gy = gyroList.lastOrNull()
+                    val lg = filteredLowG.lastOrNull()
+                    val hg = filteredHighG.lastOrNull()
+                    val gy = filteredGyro.lastOrNull()
                     if (lg != null && hg != null && gy != null) {
                         String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f  [mdps] X=%8.2f Y=%8.2f Z=%8.2f",
                             lg.x, lg.y, lg.z, hg.x, hg.y, hg.z, gy.x, gy.y, gy.z)
@@ -622,11 +723,11 @@ class BleViewModel : ViewModel() {
         if (_isRecording.value) {
             logFile?.let { file ->
                 val sb = StringBuilder()
-                val count = maxOf(lowGList.size, highGList.size, gyroList.size)
+                val count = maxOf(filteredLowG.size, filteredHighG.size, filteredGyro.size)
                 for (i in 0 until count) {
-                    val lg = lowGList.getOrNull(i)
-                    val hg = highGList.getOrNull(i)
-                    val gy = gyroList.getOrNull(i)
+                    val lg = filteredLowG.getOrNull(i)
+                    val hg = filteredHighG.getOrNull(i)
+                    val gy = filteredGyro.getOrNull(i)
                     if (lg != null) sb.append(String.format(Locale.US, "[Low-G mg] X=%.2f Y=%.2f Z=%.2f ", lg.x, lg.y, lg.z))
                     if (hg != null) sb.append(String.format(Locale.US, "[High-G g] X=%.2f Y=%.2f Z=%.2f ", hg.x, hg.y, hg.z))
                     if (gy != null) sb.append(String.format(Locale.US, "[Gyro mdps] X=%.2f Y=%.2f Z=%.2f ", gy.x, gy.y, gy.z))
@@ -896,6 +997,23 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     val timeWindowSec by viewModel.timeWindowSec.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
+
+    val isFilterEnabled by viewModel.isFilterEnabled.collectAsState()
+    val filterAlpha by viewModel.filterAlpha.collectAsState()
+    var isFilterExpanded by remember { mutableStateOf(false) }
+
+    val cutoffHz = viewModel.getCalculatedCutoffFrequency()
+    val cutoffText = if (cutoffHz >= 1000f) {
+        String.format(Locale.US, "%.2f kHz", cutoffHz / 1000f)
+    } else {
+        String.format(Locale.US, "%.2f Hz", cutoffHz)
+    }
+
+    val filterSummary = if (isFilterEnabled) {
+        String.format(Locale.US, "Enabled (α = %.2f, fc = %s)", filterAlpha, cutoffText)
+    } else {
+        "Disabled"
+    }
 
     var showPlotInfoDialog by remember { mutableStateOf(false) }
     var showOdrInfoDialog by remember { mutableStateOf(false) }
@@ -1401,6 +1519,126 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                                             onSelected = { viewModel.setHighGRange(it) }
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Digital Filter Section
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isFilterExpanded = !isFilterExpanded }
+                            .padding(bottom = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Digital Low-Pass Filter (EMA)",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = filterSummary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
+                        Text(
+                            text = if (isFilterExpanded) "▲" else "▼",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    if (isFilterExpanded) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Enable Filter",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Switch(
+                                    checked = isFilterEnabled,
+                                    onCheckedChange = { viewModel.setFilterEnabled(it) }
+                                )
+                            }
+
+                            if (isFilterEnabled) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Smoothing Alpha (α)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = String.format(Locale.US, "%.2f", filterAlpha),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Slider(
+                                        value = filterAlpha,
+                                        onValueChange = { viewModel.setFilterAlpha(it) },
+                                        valueRange = 0.01f..1f,
+                                        steps = 98
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 2.dp, bottom = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Cut-off Frequency (fc):",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = cutoffText,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Text(
+                                        text = "Lower α = smoother (higher lag). Higher α = more responsive (less smoothing).",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                             }
                         }
