@@ -64,7 +64,9 @@ import java.util.UUID
 import java.util.Locale
 import android.view.ViewGroup
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.XAxis
@@ -1468,6 +1470,18 @@ private fun SensorChart(
     var showY by remember { mutableStateOf(true) }
     var showZ by remember { mutableStateOf(true) }
 
+    LaunchedEffect(points, isPaused, timeWindowSec) {
+        if (!isPaused && cursor1 != null) {
+            val maxTime = if (points.isNotEmpty()) points.last().time else 0f
+            val windowMs = timeWindowSec * 1000f
+            val minTime = maxTime - windowMs
+            if (cursor1!!.x < minTime) {
+                cursor1 = null
+                cursor2 = null
+            }
+        }
+    }
+
     Column(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -1496,31 +1510,37 @@ private fun SensorChart(
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent()
-                            val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
                             val pressed = event.changes.filter { it.pressed }
+                            val chart = chartRef.value
 
-                            if (pressed.size >= 2 && isPaused) {
-                                val chart = chartRef.value
-                                if (chart != null) {
-                                    val p1 = pressed[0].position
-                                    val p2 = pressed[1].position
-                                    val h1 = chart.getHighlightByTouchPoint(p1.x, p1.y)
-                                    val h2 = chart.getHighlightByTouchPoint(p2.x, p2.y)
-                                    if (h1 != null && h2 != null) {
-                                        cursor1 = Entry(h1.x, h1.y)
-                                        cursor2 = Entry(h2.x, h2.y)
-                                    }
-                                }
-                            } else if (newlyPressed.size == 1) {
-                                val chart = chartRef.value
-                                if (chart != null) {
-                                    val pos = newlyPressed[0].position
-                                    val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
-                                    if (h != null) {
-                                        cursor1 = Entry(h.x, h.y)
-                                        if (!isPaused) {
+                            if (chart != null) {
+                                if (isPaused) {
+                                    val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
+                                    if (pressed.size >= 2) {
+                                        val p1 = pressed[0].position
+                                        val p2 = pressed[1].position
+                                        val h1 = chart.getHighlightByTouchPoint(p1.x, p1.y)
+                                        val h2 = chart.getHighlightByTouchPoint(p2.x, p2.y)
+                                        if (h1 != null && h2 != null) {
+                                            cursor1 = Entry(h1.x, h1.y)
+                                            cursor2 = Entry(h2.x, h2.y)
+                                        }
+                                    } else if (newlyPressed.size == 1) {
+                                        val pos = newlyPressed[0].position
+                                        val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                        if (h != null) {
+                                            cursor1 = Entry(h.x, h.y)
                                             cursor2 = null
                                         }
+                                    }
+                                } else {
+                                    if (pressed.size == 1) {
+                                        val pos = pressed[0].position
+                                        val offsetX = -70f
+                                        val offsetY = -120f
+                                        val valD = chart.getValuesByTouchPoint(pos.x + offsetX, pos.y + offsetY, YAxis.AxisDependency.LEFT)
+                                        cursor1 = Entry(valD.x.toFloat(), valD.y.toFloat())
+                                        cursor2 = null
                                     }
                                 }
                             }
@@ -1603,32 +1623,65 @@ private fun SensorChart(
 
                     val data = LineData(dataSets.map { it as ILineDataSet })
                     chart.data = data
-
-                    if (!isPaused) {
-                        if (cursor1 != null) {
-                            chart.highlightValue(Highlight(cursor1!!.x, cursor1!!.y, 0))
-                        } else {
-                            chart.highlightValue(null)
-                        }
-                    } else {
-                        val highlights = mutableListOf<Highlight>()
-                        if (cursor1 != null) {
-                            highlights.add(Highlight(cursor1!!.x, cursor1!!.y, 0))
-                        }
-                        if (cursor2 != null) {
-                            highlights.add(Highlight(cursor2!!.x, cursor2!!.y, 0))
-                        }
-                        if (highlights.isNotEmpty()) {
-                            chart.highlightValues(highlights.toTypedArray())
-                        } else {
-                            chart.highlightValue(null)
-                        }
-                    }
+                    chart.highlightValue(null)
 
                     chart.notifyDataSetChanged()
                     chart.invalidate()
                 }
             )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val chart = chartRef.value
+                if (chart != null) {
+                    if (cursor1 != null) {
+                        val pixelD = chart.getPixelForValues(cursor1!!.x, cursor1!!.y, YAxis.AxisDependency.LEFT)
+                        val px = pixelD.x.toFloat()
+                        val py = pixelD.y.toFloat()
+
+                        drawLine(
+                            color = Color(0xFF00E5FF),
+                            start = Offset(px, 0f),
+                            end = Offset(px, size.height),
+                            strokeWidth = 1.5f
+                        )
+                        drawLine(
+                            color = Color(0xFF00E5FF),
+                            start = Offset(0f, py),
+                            end = Offset(size.width, py),
+                            strokeWidth = 1.5f
+                        )
+                        drawCircle(
+                            color = Color(0xFF00E5FF),
+                            radius = 5f,
+                            center = Offset(px, py)
+                        )
+                    }
+
+                    if (cursor2 != null) {
+                        val pixelD2 = chart.getPixelForValues(cursor2!!.x, cursor2!!.y, YAxis.AxisDependency.LEFT)
+                        val px2 = pixelD2.x.toFloat()
+                        val py2 = pixelD2.y.toFloat()
+
+                        drawLine(
+                            color = Color(0xFFFFAB40),
+                            start = Offset(px2, 0f),
+                            end = Offset(px2, size.height),
+                            strokeWidth = 1.5f
+                        )
+                        drawLine(
+                            color = Color(0xFFFFAB40),
+                            start = Offset(0f, py2),
+                            end = Offset(size.width, py2),
+                            strokeWidth = 1.5f
+                        )
+                        drawCircle(
+                            color = Color(0xFFFFAB40),
+                            radius = 5f,
+                            center = Offset(px2, py2)
+                        )
+                    }
+                }
+            }
         }
 
         // Cursor details in the space below X axis
