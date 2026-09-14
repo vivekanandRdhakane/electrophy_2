@@ -27,6 +27,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -336,6 +338,9 @@ class BleViewModel : ViewModel() {
     private val _autoTriggerAxis = MutableStateFlow("Z")
     val autoTriggerAxis: StateFlow<String> = _autoTriggerAxis
 
+    private val _autoTriggerCondition = MutableStateFlow("Below")
+    val autoTriggerCondition: StateFlow<String> = _autoTriggerCondition
+
     private val _autoTriggerThreshold = MutableStateFlow(50f)
     val autoTriggerThreshold: StateFlow<Float> = _autoTriggerThreshold
 
@@ -343,14 +348,20 @@ class BleViewModel : ViewModel() {
     val autoTriggerDelayMs: StateFlow<Long> = _autoTriggerDelayMs
 
     private var isTriggerPending = false
+    private var baselineX = 0f; private var baselineY = 0f; private var baselineZ = 0f; private var isBaselineInitialized = false
 
     fun setAutoTriggerEnabled(enabled: Boolean) {
         _isAutoTriggerEnabled.value = enabled
         isTriggerPending = false
+        isBaselineInitialized = false
     }
 
     fun setAutoTriggerAxis(axis: String) {
         _autoTriggerAxis.value = axis
+    }
+
+    fun setAutoTriggerCondition(condition: String) {
+        _autoTriggerCondition.value = condition
     }
 
     fun setAutoTriggerThreshold(threshold: Float) {
@@ -364,22 +375,48 @@ class BleViewModel : ViewModel() {
     private fun checkAutoTrigger(points: List<AxisPoint>) {
         if (!_isAutoTriggerEnabled.value || _isPaused.value || isTriggerPending) return
         val axis = _autoTriggerAxis.value
+        val condition = _autoTriggerCondition.value
         val threshold = _autoTriggerThreshold.value
         val delay = _autoTriggerDelayMs.value
 
         val triggered = points.any { pt ->
             val v = when (axis) {
-                "X" -> abs(pt.x)
-                "Y" -> abs(pt.y)
-                "Z" -> abs(pt.z)
-                else -> abs(pt.z)
+                "X" -> pt.x
+                "Y" -> pt.y
+                "Z" -> pt.z
+                else -> pt.z
             }
-            v >= threshold
+
+            if (!isBaselineInitialized) {
+                baselineX = pt.x
+                baselineY = pt.y
+                baselineZ = pt.z
+                isBaselineInitialized = true
+            } else {
+                val alphaBase = 0.02f
+                baselineX = alphaBase * pt.x + (1f - alphaBase) * baselineX
+                baselineY = alphaBase * pt.y + (1f - alphaBase) * baselineY
+                baselineZ = alphaBase * pt.z + (1f - alphaBase) * baselineZ
+            }
+
+            val baseline = when (axis) {
+                "X" -> baselineX
+                "Y" -> baselineY
+                "Z" -> baselineZ
+                else -> baselineZ
+            }
+
+            when (condition) {
+                "Above" -> v >= threshold
+                "Below" -> v <= threshold
+                "Deviation" -> abs(v - baseline) >= threshold
+                else -> v <= threshold
+            }
         }
 
         if (triggered) {
             isTriggerPending = true
-            Log.i(BLE_TAG, "Auto-trigger threshold crossed! Pausing in $delay ms...")
+            Log.i(BLE_TAG, "Auto-trigger threshold crossed ($condition $threshold on $axis)! Pausing in $delay ms...")
             Handler(Looper.getMainLooper()).postDelayed({
                 if (!_isPaused.value) {
                     togglePause()
@@ -1076,6 +1113,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
 
     val isAutoTriggerEnabled by viewModel.isAutoTriggerEnabled.collectAsState()
     val autoTriggerAxis by viewModel.autoTriggerAxis.collectAsState()
+    val autoTriggerCondition by viewModel.autoTriggerCondition.collectAsState()
     val autoTriggerThreshold by viewModel.autoTriggerThreshold.collectAsState()
     val autoTriggerDelayMs by viewModel.autoTriggerDelayMs.collectAsState()
     var isAutoTriggerExpanded by remember { mutableStateOf(false) }
@@ -1096,7 +1134,6 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
 
     var showPlotInfoDialog by remember { mutableStateOf(false) }
     var showOdrInfoDialog by remember { mutableStateOf(false) }
-    var showRangeInfoDialog by remember { mutableStateOf(false) }
     var showTimeWindowInfoDialog by remember { mutableStateOf(false) }
     var showFilterInfoDialog by remember { mutableStateOf(false) }
     var isOdrExpanded by remember { mutableStateOf(false) }
@@ -1704,126 +1741,151 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             }
 
             // Auto-Trigger Section
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                )
-            ) {
-                Column(
+            if (selectedMode != GraphMode.BOTH_ACC) {
+                Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    )
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { isAutoTriggerExpanded = !isAutoTriggerExpanded }
-                            .padding(bottom = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Auto-Trigger / Spike Capture",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            val triggerSummary = if (isAutoTriggerEnabled) {
-                                String.format(Locale.US, "Enabled (%s-axis ≥ %.1f, delay %dms)", autoTriggerAxis, autoTriggerThreshold, autoTriggerDelayMs)
-                            } else {
-                                "Disabled"
-                            }
-                            Text(
-                                text = triggerSummary,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = if (isAutoTriggerExpanded) "▲" else "▼",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            InfoIconButton(onClick = { showAutoTriggerInfoDialog = true })
-                        }
-                    }
-
-                    if (isAutoTriggerExpanded) {
-                        Column(
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                .clickable { isAutoTriggerExpanded = !isAutoTriggerExpanded }
+                                .padding(bottom = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Enable Auto-Trigger",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    text = "Auto-Trigger / Spike Capture",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
-                                Switch(
-                                    checked = isAutoTriggerEnabled,
-                                    onCheckedChange = { viewModel.setAutoTriggerEnabled(it) }
+                                val triggerSummary = if (isAutoTriggerEnabled) {
+                                    String.format(Locale.US, "Enabled (%s %s-axis, th=%.1f)", autoTriggerCondition, autoTriggerAxis, autoTriggerThreshold)
+                                } else {
+                                    "Disabled"
+                                }
+                                Text(
+                                    text = triggerSummary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
                                 )
                             }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = if (isAutoTriggerExpanded) "▲" else "▼",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                InfoIconButton(onClick = { showAutoTriggerInfoDialog = true })
+                            }
+                        }
 
-                            if (isAutoTriggerEnabled) {
+                        if (isAutoTriggerExpanded) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "Trigger Axis",
+                                        text = "Enable Auto-Trigger",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        listOf("X", "Y", "Z").forEach { axis ->
-                                            FilterChip(
-                                                selected = autoTriggerAxis == axis,
-                                                onClick = { viewModel.setAutoTriggerAxis(axis) },
-                                                label = { Text(axis) }
-                                            )
-                                        }
-                                    }
+                                    Switch(
+                                        checked = isAutoTriggerEnabled,
+                                        onCheckedChange = { viewModel.setAutoTriggerEnabled(it) }
+                                    )
                                 }
 
-                                var thresholdText by remember(autoTriggerThreshold) { mutableStateOf(autoTriggerThreshold.toString()) }
-                                OutlinedTextField(
-                                    value = thresholdText,
-                                    onValueChange = { newVal ->
-                                        thresholdText = newVal
-                                        newVal.toFloatOrNull()?.let { viewModel.setAutoTriggerThreshold(it) }
-                                    },
-                                    label = { Text("Threshold Value") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    textStyle = MaterialTheme.typography.bodySmall
-                                )
+                                if (isAutoTriggerEnabled) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Condition",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            listOf("Above", "Below", "Deviation").forEach { cond ->
+                                                FilterChip(
+                                                    selected = autoTriggerCondition == cond,
+                                                    onClick = { viewModel.setAutoTriggerCondition(cond) },
+                                                    label = { Text(cond) }
+                                                )
+                                            }
+                                        }
+                                    }
 
-                                var delayText by remember(autoTriggerDelayMs) { mutableStateOf(autoTriggerDelayMs.toString()) }
-                                OutlinedTextField(
-                                    value = delayText,
-                                    onValueChange = { newVal ->
-                                        delayText = newVal
-                                        newVal.toLongOrNull()?.let { viewModel.setAutoTriggerDelayMs(it) }
-                                    },
-                                    label = { Text("Post-Trigger Delay (ms)") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    textStyle = MaterialTheme.typography.bodySmall
-                                )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Trigger Axis",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            listOf("X", "Y", "Z").forEach { axis ->
+                                                FilterChip(
+                                                    selected = autoTriggerAxis == axis,
+                                                    onClick = { viewModel.setAutoTriggerAxis(axis) },
+                                                    label = { Text(axis) }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    var thresholdText by remember(autoTriggerThreshold) { mutableStateOf(autoTriggerThreshold.toString()) }
+                                    OutlinedTextField(
+                                        value = thresholdText,
+                                        onValueChange = { newVal ->
+                                            thresholdText = newVal
+                                            newVal.toFloatOrNull()?.let { viewModel.setAutoTriggerThreshold(it) }
+                                        },
+                                        label = { Text("Threshold Value") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.bodySmall,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                                    )
+
+                                    var delayText by remember(autoTriggerDelayMs) { mutableStateOf(autoTriggerDelayMs.toString()) }
+                                    OutlinedTextField(
+                                        value = delayText,
+                                        onValueChange = { newVal ->
+                                            delayText = newVal
+                                            newVal.toLongOrNull()?.let { viewModel.setAutoTriggerDelayMs(it) }
+                                        },
+                                        label = { Text("Post-Trigger Delay (ms)") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.bodySmall,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1846,7 +1908,12 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             if (showAutoTriggerInfoDialog) {
                 InfoAlertDialog(
                     title = "Auto-Trigger / Spike Capture",
-                    infoText = "• Auto-Trigger automatically pauses the running plot when a sensor signal on the selected axis (X, Y, or Z) crosses the preset threshold value.\n\n" +
+                    infoText = "• Auto-Trigger automatically pauses the running plot when sensor signals meet preset criteria:\n\n" +
+                            "• Trigger Conditions:\n" +
+                            "  - Above: Triggers when Value ≥ Threshold\n" +
+                            "  - Below: Triggers when Value ≤ Threshold (ideal for negative spikes when baseline is high)\n" +
+                            "  - Deviation: Triggers when |Value - Baseline| ≥ Threshold (ignores DC offset / baseline)\n\n" +
+                            "• Trigger Axis: Monitor X, Y, or Z axis.\n\n" +
                             "• Post-Trigger Delay (ms): Allows recording a short window of data after the spike occurs before pausing the stream.",
                     onDismiss = { showAutoTriggerInfoDialog = false }
                 )
@@ -1869,17 +1936,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
                 )
             }
 
-            if (showRangeInfoDialog) {
-                InfoAlertDialog(
-                    title = "Full-Scale Range",
-                    infoText = "• Full-Scale Range (FS) sets the measurement ceiling:\n" +
-                            "  - Low-G Range: ±2 g, ±4 g, ±8 g, ±16 g\n" +
-                            "  - High-G Range: ±32 g, ±64 g, ±128 g, ±256 g, ±320 g\n" +
-                            "  - Gyroscope Range: ±250 dps, ±500 dps, ±1000 dps, ±2000 dps, ±4000 dps\n\n" +
-                            "• Lower ranges give finer measurement resolution, while higher ranges prevent signal clipping under heavy vibration or rapid motion.",
-                    onDismiss = { showRangeInfoDialog = false }
-                )
-            }
+
 
             if (showTimeWindowInfoDialog) {
                 InfoAlertDialog(
