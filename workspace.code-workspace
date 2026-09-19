@@ -1,12 +1,6 @@
 {
 	"folders": [
 		{
-			"path": "sensor_nucleo_L552_cmake"
-		},
-		{
-			"path": "sensor_nucleo_L552_with_int"
-		},
-		{
 			"path": "../STMems_Standard_C_drivers"
 		},
 		{
@@ -14,6 +8,9 @@
 		},
 		{
 			"path": "Electrophy_app"
+		},
+		{
+			"path": "archived"
 		}
 	],
 	"settings": {
