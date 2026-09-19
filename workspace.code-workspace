@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "archived"
+		},
+		{
+			"path": "PCB_Project"
 		}
 	],
 	"settings": {
