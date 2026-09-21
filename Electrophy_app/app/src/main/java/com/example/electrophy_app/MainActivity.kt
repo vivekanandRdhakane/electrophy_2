@@ -1204,7 +1204,7 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("ESP_IMU Monitor") },
+                title = { Text("ElectroPhy") },
                 actions = {
                     val color = when (connectionState) {
                         ConnectionState.Connected -> Color.Green
