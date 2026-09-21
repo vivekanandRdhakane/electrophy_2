@@ -1,0 +1,102 @@
+(footprint "pogo_pads_4"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 0 -5.54 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "77d1d5c9-546d-4977-95aa-fa4ad6eb4adf")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+		)
+	)
+	(property "Value" "pogo_pads_4"
+		(at 0 -4.04 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "3b98f10f-9969-4446-be79-307cef539ef9")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "d196d83f-58dd-45cc-b3ff-15d7422e584e")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "cb5f1f16-d957-47d3-a119-d133df7be713")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_rect
+		(start -1.905 -1.6764)
+		(end 1.7526 9.144)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "db0a6689-d955-41aa-870c-a7d1dae43b73")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 -2.54 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "925028dc-bf35-4bef-b149-5b5fc654dd5e")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at 0 0)
+		(size 2.286 2.286)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "0ea10fba-cf39-4b09-b42b-05dc50649121")
+	)
+	(pad "2" smd circle
+		(at 0 2.54)
+		(size 2.286 2.286)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "2d31654f-f9d2-466a-8451-f2aded56be4f")
+	)
+	(pad "3" smd circle
+		(at 0 5.08)
+		(size 2.286 2.286)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "5823b281-f6f9-4e50-9f62-fcf53127654f")
+	)
+	(pad "4" smd circle
+		(at 0 7.62)
+		(size 2.286 2.286)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "5365649e-e5dd-486e-8b80-c1f42afd9c1a")
+	)
+	(embedded_fonts no)
+)

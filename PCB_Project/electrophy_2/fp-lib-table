@@ -3,4 +3,7 @@
 	(lib (name "LSM6DSV320X") (type "KiCad") (uri "${KIPRJMOD}/LSM6DSV320X.pretty") (options "") (descr ""))
 	(lib (name "TPS27081ADDCR") (type "KiCad") (uri "${KIPRJMOD}/TPS27081ADDCR.pretty") (options "") (descr ""))
 	(lib (name "chip_antenna") (type "KiCad") (uri "${KIPRJMOD}/chip_antenna.pretty") (options "") (descr ""))
+	(lib (name "Library") (type "KiCad") (uri "${KIPRJMOD}/pogo_pads_4/Library.pretty") (options "") (descr ""))
+	(lib (name "Library") (type "KiCad") (uri "${KIPRJMOD}/pogo_pads_4/Library.pretty") (options "") (descr ""))
+	(lib (name "pogo_pads_4") (type "KiCad") (uri "${KIPRJMOD}/pogo_pads_4.pretty") (options "") (descr ""))
 )
