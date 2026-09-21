@@ -203,34 +203,115 @@ static volatile int64_t g_send_interval_us = 66667LL;  /* 1/15 Hz ≈ 66 667 µs
 static volatile uint32_t g_drdy_timeout_ms = 350;      /* 5 × 66.7 ms ≈ 333 ms */
 
 /**
- * @brief Recompute g_send_interval_us and g_drdy_timeout_ms from current ODRs.
+ * @brief Dynamically update INT1 routing so that only the active sensor's
+ *        DRDY interrupt triggers sensor_task wakeups.
  *
- * Call this after changing any sensor ODR so the main loop self-adjusts.
- * The send interval equals the period of the slowest ACTIVE sensor, clamped
- * to at least 1 ms. The DRDY timeout is 5× that period, min 50 ms.
+ * LSM6DSV320X routes Low-G and Gyro data-ready via INT1_CTRL (0x0D),
+ * and High-G data-ready via CTRL7 (0x16). Both must be configured so
+ * that High-G DRDY triggers INT1 when streaming High-G, Low-G DRDY triggers
+ * INT1 when streaming Low-G, etc.
+ */
+static void update_int_routing(void)
+{
+    if (spi_mutex == NULL) {
+        return;
+    }
+
+    lsm6dsv320x_pin_int_route_t pin_int = {0};
+
+    switch (current_stream_mode) {
+    case STREAM_MODE_LOW_ACC:
+        if (g_xl_odr_hz > 0.0f) {
+            pin_int.drdy_xl = PROPERTY_ENABLE;
+        }
+        break;
+
+    case STREAM_MODE_HIGH_ACC:
+        if (g_hg_odr_hz > 0.0f) {
+            pin_int.drdy_hg_xl = PROPERTY_ENABLE;
+        }
+        break;
+
+    case STREAM_MODE_ONLY_GYRO:
+        if (g_gy_odr_hz > 0.0f) {
+            pin_int.drdy_g = PROPERTY_ENABLE;
+        }
+        break;
+
+    case STREAM_MODE_BOTH_ACC:
+        /* Route the fastest active sensor to drive INT1 */
+        if (g_hg_odr_hz >= g_xl_odr_hz && g_hg_odr_hz > 0.0f) {
+            pin_int.drdy_hg_xl = PROPERTY_ENABLE;
+        } else if (g_xl_odr_hz > 0.0f) {
+            pin_int.drdy_xl = PROPERTY_ENABLE;
+        }
+        break;
+
+    case STREAM_MODE_ALL:
+    default:
+        /* Route the fastest active sensor among Low-G, High-G, Gyro */
+        if (g_hg_odr_hz >= g_xl_odr_hz && g_hg_odr_hz >= g_gy_odr_hz && g_hg_odr_hz > 0.0f) {
+            pin_int.drdy_hg_xl = PROPERTY_ENABLE;
+        } else if (g_gy_odr_hz >= g_xl_odr_hz && g_gy_odr_hz > 0.0f) {
+            pin_int.drdy_g = PROPERTY_ENABLE;
+        } else if (g_xl_odr_hz > 0.0f) {
+            pin_int.drdy_xl = PROPERTY_ENABLE;
+        }
+        break;
+    }
+
+    lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
+    lsm6dsv320x_pin_int1_route_hg_set(&dev_ctx, &pin_int);
+
+    ESP_LOGI("INT_ROUTE", "INT1 routing updated: mode=%d xl=%u hg=%u g=%u",
+             current_stream_mode, pin_int.drdy_xl, pin_int.drdy_hg_xl, pin_int.drdy_g);
+}
+
+/**
+ * @brief Recompute g_send_interval_us, g_drdy_timeout_ms, and update INT1 routing.
+ *
+ * Call this after changing any sensor ODR or stream mode so the main loop self-adjusts.
+ * The DRDY timeout is 5× the period of the active streaming sensor, min 50 ms.
  */
 static void odr_recompute_timing(void)
 {
-    /* Collect active (> 0 Hz) ODRs */
-    float min_hz = 0.0f;
+    float active_hz = 0.0f;
 
-    if (g_xl_odr_hz > 0.0f) {
-        min_hz = (min_hz == 0.0f) ? g_xl_odr_hz : (g_xl_odr_hz < min_hz ? g_xl_odr_hz : min_hz);
+    switch (current_stream_mode) {
+    case STREAM_MODE_LOW_ACC:
+        active_hz = g_xl_odr_hz;
+        break;
+    case STREAM_MODE_HIGH_ACC:
+        active_hz = g_hg_odr_hz;
+        break;
+    case STREAM_MODE_ONLY_GYRO:
+        active_hz = g_gy_odr_hz;
+        break;
+    case STREAM_MODE_BOTH_ACC:
+        if (g_xl_odr_hz > 0.0f && g_hg_odr_hz > 0.0f) {
+            active_hz = (g_xl_odr_hz < g_hg_odr_hz) ? g_xl_odr_hz : g_hg_odr_hz;
+        } else {
+            active_hz = (g_xl_odr_hz > 0.0f) ? g_xl_odr_hz : g_hg_odr_hz;
+        }
+        break;
+    case STREAM_MODE_ALL:
+    default: {
+        float min_h = 0.0f;
+        if (g_xl_odr_hz > 0.0f) min_h = g_xl_odr_hz;
+        if (g_gy_odr_hz > 0.0f) min_h = (min_h == 0.0f) ? g_gy_odr_hz : (g_gy_odr_hz < min_h ? g_gy_odr_hz : min_h);
+        if (g_hg_odr_hz > 0.0f) min_h = (min_h == 0.0f) ? g_hg_odr_hz : (g_hg_odr_hz < min_h ? g_hg_odr_hz : min_h);
+        active_hz = min_h;
+        break;
     }
-    if (g_gy_odr_hz > 0.0f) {
-        min_hz = (min_hz == 0.0f) ? g_gy_odr_hz : (g_gy_odr_hz < min_hz ? g_gy_odr_hz : min_hz);
-    }
-    if (g_hg_odr_hz > 0.0f) {
-        min_hz = (min_hz == 0.0f) ? g_hg_odr_hz : (g_hg_odr_hz < min_hz ? g_hg_odr_hz : min_hz);
     }
 
-    if (min_hz <= 0.0f) {
-        /* All sensors off — fall back to 1 Hz so the loop is not completely frozen */
-        min_hz = 1.0f;
+    if (active_hz <= 0.0f) {
+        /* All active sensors off — fall back to 1 Hz so the loop is not completely frozen */
+        active_hz = 1.0f;
     }
 
-    int64_t  period_us = (int64_t)(1e6f / min_hz);
-    uint32_t timeout_ms = (uint32_t)((5.0f * 1000.0f) / min_hz);
+    int64_t  period_us  = (int64_t)(1e6f / active_hz);
+    uint32_t timeout_ms = (uint32_t)((5.0f * 1000.0f) / active_hz);
 
     if (period_us  < 1000LL) period_us  = 1000LL;   /* floor 1 ms  */
     if (timeout_ms < 50)     timeout_ms = 50;         /* floor 50 ms */
@@ -238,8 +319,16 @@ static void odr_recompute_timing(void)
     g_send_interval_us = period_us;
     g_drdy_timeout_ms  = timeout_ms;
 
-    ESP_LOGI("ODR", "Timing updated: slowest ODR=%.3f Hz  send_interval=%lld µs  drdy_timeout=%lu ms",
-             min_hz, (long long)period_us, (unsigned long)timeout_ms);
+    ESP_LOGI("ODR", "Timing updated: mode=%d active_odr=%.3f Hz  send_interval=%lld µs  drdy_timeout=%lu ms",
+             current_stream_mode, active_hz, (long long)period_us, (unsigned long)timeout_ms);
+
+    /* Update hardware INT1 interrupt routing */
+    update_int_routing();
+
+    /* Unblock the sensor task if waiting on previous timeout */
+    if (sensor_task_handle != NULL) {
+        xTaskNotifyGive(sensor_task_handle);
+    }
 }
 
 /* ── INT1 ISR ─────────────────────────────────────────────────────────────── */
@@ -424,22 +513,27 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         } else if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
             current_stream_mode = STREAM_MODE_LOW_ACC;
             s_batch_sample_count = 0;
+            odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
             current_stream_mode = STREAM_MODE_HIGH_ACC;
             s_batch_sample_count = 0;
+            odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: HIGH-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "both_acc") == 0 || strcasecmp(cmd, "acc") == 0) {
             current_stream_mode = STREAM_MODE_BOTH_ACC;
             s_batch_sample_count = 0;
+            odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: BOTH ACCELEROMETERS (LOW-G + HIGH-G)");
         } else if (strcasecmp(cmd, "only_gyro") == 0 || strcasecmp(cmd, "gyro") == 0) {
             current_stream_mode = STREAM_MODE_ONLY_GYRO;
             s_batch_sample_count = 0;
+            odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: GYROSCOPE ONLY");
         } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
             current_stream_mode = STREAM_MODE_ALL;
             s_batch_sample_count = 0;
+            odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
 
         /* ── Low-G accelerometer ODR commands (CTRL1 0x10) ────────────── */
@@ -1097,11 +1191,8 @@ static void sensor_task(void *arg)
     lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_320g);
     lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_480Hz, 1);
 
-    /* Route DRDY_XL + DRDY_G to INT1 (GPIO10) */
-    lsm6dsv320x_pin_int_route_t pin_int = {0};
-    pin_int.drdy_xl = PROPERTY_ENABLE;
-    pin_int.drdy_g  = PROPERTY_ENABLE;
-    lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
+    /* Initialise timing and route DRDY to INT1 (GPIO10) based on current stream mode */
+    odr_recompute_timing();
 
     ESP_LOGI(TAG, "Sensor ready (Low-G + High-G + Gyro). Waiting for BLE connection...");
 
