@@ -2802,7 +2802,7 @@ private fun SensorChart(
 }
 
 @Composable
-private fun ClickableLegend(color: Color, label: String, visible: Boolean, onClick: () -> Unit) {
+fun ClickableLegend(color: Color, label: String, visible: Boolean, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .clickable(

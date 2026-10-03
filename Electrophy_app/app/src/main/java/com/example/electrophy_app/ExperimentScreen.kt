@@ -1090,13 +1090,29 @@ private fun ExperimentChart(
     timeWindowSec: Float,
     modifier: Modifier = Modifier
 ) {
+    var showX by remember { mutableStateOf(true) }
+    var showY by remember { mutableStateOf(true) }
+    var showZ by remember { mutableStateOf(true) }
+
     Column(modifier = modifier) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ClickableLegend(Color.Red, "X", showX) { showX = !showX }
+                ClickableLegend(Color.Green, "Y", showY) { showY = !showY }
+                ClickableLegend(Color.Blue, "Z", showZ) { showZ = !showZ }
+            }
+        }
         
         AndroidView(
             factory = { ctx ->
@@ -1129,8 +1145,7 @@ private fun ExperimentChart(
                         gridColor = android.graphics.Color.parseColor("#333333")
                     }
                     axisRight.isEnabled = false
-                    legend.isEnabled = true
-                    legend.textColor = android.graphics.Color.WHITE
+                    legend.isEnabled = false
                 }
             },
             modifier = Modifier.fillMaxSize().padding(bottom = 4.dp),
@@ -1144,24 +1159,30 @@ private fun ExperimentChart(
                 val entriesZ = filtered.map { Entry(it.time, it.z) }
 
                 val dataSets = mutableListOf<LineDataSet>()
-                dataSets.add(LineDataSet(entriesX, "X").apply {
-                    color = android.graphics.Color.RED
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                })
-                dataSets.add(LineDataSet(entriesY, "Y").apply {
-                    color = android.graphics.Color.GREEN
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                })
-                dataSets.add(LineDataSet(entriesZ, "Z").apply {
-                    color = android.graphics.Color.BLUE
-                    setDrawCircles(false)
-                    lineWidth = 2f
-                    setDrawValues(false)
-                })
+                if (showX) {
+                    dataSets.add(LineDataSet(entriesX, "X").apply {
+                        color = android.graphics.Color.RED
+                        setDrawCircles(false)
+                        lineWidth = 2f
+                        setDrawValues(false)
+                    })
+                }
+                if (showY) {
+                    dataSets.add(LineDataSet(entriesY, "Y").apply {
+                        color = android.graphics.Color.GREEN
+                        setDrawCircles(false)
+                        lineWidth = 2f
+                        setDrawValues(false)
+                    })
+                }
+                if (showZ) {
+                    dataSets.add(LineDataSet(entriesZ, "Z").apply {
+                        color = android.graphics.Color.BLUE
+                        setDrawCircles(false)
+                        lineWidth = 2f
+                        setDrawValues(false)
+                    })
+                }
 
                 chart.data = LineData(dataSets.map { it as ILineDataSet })
                 chart.notifyDataSetChanged()
