@@ -16,6 +16,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.Entry
@@ -58,6 +63,10 @@ fun ExperimentScreen(
     val autoTriggerThreshold by viewModel.autoTriggerThreshold.collectAsState()
     val autoTriggerDelayMs by viewModel.autoTriggerDelayMs.collectAsState()
     var isAutoTriggerExpanded by remember { mutableStateOf(false) }
+
+    val logMessages by viewModel.logMessages.collectAsState()
+    val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
+    var isTerminalVisible by remember { mutableStateOf(false) }
 
     var isOdrExpanded by remember { mutableStateOf(false) }
     var instructionsExpanded by remember { mutableStateOf(false) }
@@ -850,6 +859,74 @@ fun ExperimentScreen(
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Collapsible Terminal Section
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                        .clickable { isTerminalVisible = !isTerminalVisible },
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isTerminalVisible) "Received Data Terminal ▼" else "Received Data Terminal ▲",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "$receivedSamplesPerSecond samples/s",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "${logMessages.size} lines",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                if (isTerminalVisible) {
+                    val listState = rememberLazyListState()
+                    LaunchedEffect(logMessages.size) {
+                        if (logMessages.isNotEmpty()) {
+                            listState.scrollToItem(logMessages.size - 1)
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .height(80.dp)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp)
+                            .background(Color.Black)
+                    ) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(4.dp)
+                        ) {
+                            items(logMessages) { msg ->
+                                Text(
+                                    text = msg,
+                                    color = Color.Green,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp
+                                )
                             }
                         }
                     }
