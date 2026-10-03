@@ -71,7 +71,7 @@ data class Vec3(val x: Float, val y: Float, val z: Float) {
 private data class PolyFace(
     val v: List<Vec3>,
     val baseColor: Color,
-    val isDoubleSided: Boolean = true,
+    val isDoubleSided: Boolean = false,
     val isOutlineOnly: Boolean = false,
     val outlineColor: Color = Color(0x33FFFFFF)
 )
@@ -350,9 +350,8 @@ private fun DrawScope.drawAirplaneMesh(
     val bodyColor    = Color(0xFFFFFFFF)
     val bodyDark     = Color(0xFF90A4AE)
 
-    // 3. Wings & Elevators: Electric Solar Yellow / Gold
+    // 3. Wings & Elevators: Electric Solar Yellow
     val wingColor    = Color(0xFFFFD600)
-    val wingUnderside= Color(0xFFFF8F00)
     val elevColor    = Color(0xFFFFD600)
 
     // Accents
@@ -386,24 +385,20 @@ private fun DrawScope.drawAirplaneMesh(
         PolyFace(listOf(fuseMidLeft, fuseTailLeft, fuseTailBottom, fuseMidBottom), bodyDark),
         PolyFace(listOf(fuseMidRight, fuseMidBottom, fuseTailBottom, fuseTailRight), bodyDark),
 
-        // Main Wings (Distinct Color: Electric Solar Yellow / Gold)
-        PolyFace(listOf(wingLRootFront, wingLTipFront, wingLTipBack, wingLRootBack), wingColor),
-        PolyFace(listOf(wingLRootBack, wingLTipBack, wingLTipFront, wingLRootFront), wingUnderside),
-
-        PolyFace(listOf(wingRRootFront, wingRRootBack, wingRTipBack, wingRTipFront), wingColor),
-        PolyFace(listOf(wingRRootBack, wingRRootFront, wingRTipFront, wingRTipBack), wingUnderside),
+        // Main Wings (Distinct Color: Electric Solar Yellow - Single Double-Sided Face to avoid Z-fighting)
+        PolyFace(listOf(wingLRootFront, wingLTipFront, wingLTipBack, wingLRootBack), wingColor, isDoubleSided = true),
+        PolyFace(listOf(wingRRootFront, wingRRootBack, wingRTipBack, wingRTipFront), wingColor, isDoubleSided = true),
 
         // Wingtip Navigation Beacons
-        PolyFace(listOf(wingLTipFront, wingLTipBack, Vec3(-148f, -27f, 4f)), redBeacon),
-        PolyFace(listOf(wingRTipFront, Vec3(148f, -27f, 4f), wingRTipBack), greenBeacon),
+        PolyFace(listOf(wingLTipFront, wingLTipBack, Vec3(-148f, -27f, 4f)), redBeacon, isDoubleSided = true),
+        PolyFace(listOf(wingRTipFront, Vec3(148f, -27f, 4f), wingRTipBack), greenBeacon, isDoubleSided = true),
 
         // Vertical Tail Fin (Royal Blue)
-        PolyFace(listOf(finBaseFront, finTopFront, finTopBack, finBaseBack), finColor),
-        PolyFace(listOf(finBaseBack, finTopBack, finTopFront, finBaseFront), finColor),
+        PolyFace(listOf(finBaseFront, finTopFront, finTopBack, finBaseBack), finColor, isDoubleSided = true),
 
         // Horizontal Stabilizers (Elevators: Matching Wings)
-        PolyFace(listOf(elevLRootFront, elevLTip, elevLRootBack), elevColor),
-        PolyFace(listOf(elevRRootFront, elevRRootBack, elevRTip), elevColor)
+        PolyFace(listOf(elevLRootFront, elevLTip, elevLRootBack), elevColor, isDoubleSided = true),
+        PolyFace(listOf(elevRRootFront, elevRRootBack, elevRTip), elevColor, isDoubleSided = true)
     )
 
     // 3. Transformation Angles in Radians
@@ -471,10 +466,16 @@ private fun DrawScope.drawAirplaneMesh(
         val v0 = transformedVerts[0]
         val v1 = transformedVerts[1]
         val v2 = transformedVerts[2]
-        val normal = (v1 - v0).cross(v2 - v0).normalize()
+        var normal = (v1 - v0).cross(v2 - v0).normalize()
 
-        // Directional Lambertian Shading
-        val lightFactor = (0.55f + 0.45f * max(0f, normal.dot(lightDir))).coerceIn(0.35f, 1f)
+        // For double-sided thin surfaces (wings, fin, elevators), orient normal towards light
+        // so both sides are brightly and evenly illuminated
+        if (face.isDoubleSided && normal.dot(lightDir) < 0f) {
+            normal = normal * -1f
+        }
+
+        // Directional Lambertian Shading with high ambient floor (0.75) to preserve vivid colors
+        val lightFactor = (0.75f + 0.25f * max(0f, normal.dot(lightDir))).coerceIn(0.65f, 1f)
         val shadedColor = Color(
             red = (face.baseColor.red * lightFactor).coerceIn(0f, 1f),
             green = (face.baseColor.green * lightFactor).coerceIn(0f, 1f),
