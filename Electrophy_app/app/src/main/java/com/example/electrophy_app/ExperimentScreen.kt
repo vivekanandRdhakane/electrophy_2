@@ -233,10 +233,10 @@ fun ExperimentScreen(
             // Real-time View Area (3D Airplane or Chart)
             Box(
                 modifier = Modifier
-                    .weight(1.15f)
+                    .weight(if (mode.is3dAirplaneMode && !isGraphViewForced) 1.35f else 1.15f)
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 2.dp)
-                    .background(Color(0xFF101418))
+                    .background(Color(0xFF0A0E17))
             ) {
                 val activeData = when(selectedMode) {
                     GraphMode.LOW_G -> chartData.lowG

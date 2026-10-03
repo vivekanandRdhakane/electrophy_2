@@ -341,32 +341,41 @@ private fun DrawScope.drawAirplaneMesh(
     val elevRRootBack  = Vec3(8f, -115f, 4f)
     val elevRTip       = Vec3(55f, -120f, 4f)
 
-    // Color definitions
-    val bodyColor    = Color(0xFFCBD5E1) // Aviation silver/white
-    val bodyDark     = Color(0xFF94A3B8)
-    val wingColor    = Color(0xFFE2E8F0)
-    val wingUnderside= Color(0xFF64748B)
-    val canopyColor  = Color(0xFF00E5FF).copy(alpha = 0.85f) // Glass cyan
-    val finColor     = Color(0xFF2563EB) // Royal blue fin
-    val elevColor    = Color(0xFF94A3B8)
-    val redBeacon    = Color(0xFFEF4444)
-    val greenBeacon  = Color(0xFF22C55E)
+    // High-contrast color definitions (against black background)
+    // 1. Pointed front tip (radome / nose cone): Vivid Rocket Red
+    val noseTipColor = Color(0xFFFF1E44)
+    val noseTipDark  = Color(0xFFC70024)
+
+    // 2. Main body (fuselage): Crisp Polar White
+    val bodyColor    = Color(0xFFFFFFFF)
+    val bodyDark     = Color(0xFF90A4AE)
+
+    // 3. Wings & Elevators: Electric Solar Yellow / Gold
+    val wingColor    = Color(0xFFFFD600)
+    val wingUnderside= Color(0xFFFF8F00)
+    val elevColor    = Color(0xFFFFD600)
+
+    // Accents
+    val canopyColor  = Color(0xFF00E5FF).copy(alpha = 0.90f) // Neon Cyan glass
+    val finColor     = Color(0xFF2563EB) // Royal Blue tail fin
+    val redBeacon    = Color(0xFFFF0033) // Left wingtip beacon
+    val greenBeacon  = Color(0xFF00E676) // Right wingtip beacon
 
     // 2. Assemble Polygonal Faces
     val faces = listOf(
-        // Nose Cone
-        PolyFace(listOf(noseTip, noseTop, noseLeft), bodyColor),
-        PolyFace(listOf(noseTip, noseRight, noseTop), bodyColor),
-        PolyFace(listOf(noseTip, noseLeft, noseBottom), bodyDark),
-        PolyFace(listOf(noseTip, noseBottom, noseRight), bodyDark),
+        // Pointed Nose Cone (Distinct Color: Vivid Red)
+        PolyFace(listOf(noseTip, noseTop, noseLeft), noseTipColor),
+        PolyFace(listOf(noseTip, noseRight, noseTop), noseTipColor),
+        PolyFace(listOf(noseTip, noseLeft, noseBottom), noseTipDark),
+        PolyFace(listOf(noseTip, noseBottom, noseRight), noseTipDark),
 
-        // Canopy (Cockpit)
+        // Canopy (Cockpit Glass: Neon Cyan)
         PolyFace(listOf(noseTop, canopyTop, noseLeft), canopyColor),
         PolyFace(listOf(noseTop, noseRight, canopyTop), canopyColor),
         PolyFace(listOf(canopyTop, canopyBack, fuseMidLeft), canopyColor),
         PolyFace(listOf(canopyTop, fuseMidRight, canopyBack), canopyColor),
 
-        // Fuselage Body
+        // Fuselage Main Body (Distinct Color: Brilliant Polar White)
         PolyFace(listOf(noseLeft, fuseMidTop, fuseMidLeft), bodyColor),
         PolyFace(listOf(noseRight, fuseMidRight, fuseMidTop), bodyColor),
         PolyFace(listOf(noseLeft, fuseMidLeft, fuseMidBottom, noseBottom), bodyDark),
@@ -377,11 +386,10 @@ private fun DrawScope.drawAirplaneMesh(
         PolyFace(listOf(fuseMidLeft, fuseTailLeft, fuseTailBottom, fuseMidBottom), bodyDark),
         PolyFace(listOf(fuseMidRight, fuseMidBottom, fuseTailBottom, fuseTailRight), bodyDark),
 
-        // Left Main Wing (Top & Bottom)
+        // Main Wings (Distinct Color: Electric Solar Yellow / Gold)
         PolyFace(listOf(wingLRootFront, wingLTipFront, wingLTipBack, wingLRootBack), wingColor),
         PolyFace(listOf(wingLRootBack, wingLTipBack, wingLTipFront, wingLRootFront), wingUnderside),
 
-        // Right Main Wing (Top & Bottom)
         PolyFace(listOf(wingRRootFront, wingRRootBack, wingRTipBack, wingRTipFront), wingColor),
         PolyFace(listOf(wingRRootBack, wingRRootFront, wingRTipFront, wingRTipBack), wingUnderside),
 
@@ -389,11 +397,11 @@ private fun DrawScope.drawAirplaneMesh(
         PolyFace(listOf(wingLTipFront, wingLTipBack, Vec3(-148f, -27f, 4f)), redBeacon),
         PolyFace(listOf(wingRTipFront, Vec3(148f, -27f, 4f), wingRTipBack), greenBeacon),
 
-        // Vertical Tail Fin
+        // Vertical Tail Fin (Royal Blue)
         PolyFace(listOf(finBaseFront, finTopFront, finTopBack, finBaseBack), finColor),
         PolyFace(listOf(finBaseBack, finTopBack, finTopFront, finBaseFront), finColor),
 
-        // Horizontal Stabilizers (Elevators)
+        // Horizontal Stabilizers (Elevators: Matching Wings)
         PolyFace(listOf(elevLRootFront, elevLTip, elevLRootBack), elevColor),
         PolyFace(listOf(elevRRootFront, elevRRootBack, elevRTip), elevColor)
     )
@@ -407,9 +415,9 @@ private fun DrawScope.drawAirplaneMesh(
     val pitchRad = Math.toRadians(pitchDeg.toDouble()).toFloat()
     val yawRad   = Math.toRadians(yawDeg.toDouble()).toFloat()
 
-    // Camera setup
+    // Camera setup - doubled airplane size on screen (fov = 900f)
     val cameraDist = 420f
-    val fov = 450f // Focal length
+    val fov = 900f // Doubled from 450f to double on-screen model scale
 
     val lightDir = Vec3(0.4f, -0.5f, 0.77f).normalize()
 
