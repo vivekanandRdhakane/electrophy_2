@@ -3072,7 +3072,15 @@ fun SensorCalibrationCard(
     val offsets by viewModel.calibrationOffsets.collectAsState()
     val durationSec by viewModel.calibrationDurationSec.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
+    var isExpanded by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
+
+    // If calibration starts, auto-expand so the user can see the progress bar
+    LaunchedEffect(isCalibrating) {
+        if (isCalibrating) {
+            isExpanded = true
+        }
+    }
 
     if (showInfoDialog) {
         InfoAlertDialog(
@@ -3094,7 +3102,7 @@ fun SensorCalibrationCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 1.dp),
+            .padding(horizontal = 8.dp, vertical = 2.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
         )
@@ -3102,130 +3110,178 @@ fun SensorCalibrationCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 2.dp),
+                .padding(6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
+            // Collapsible Header Row
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded }
+                    .padding(bottom = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Sensor Calibration (Zero-Drift)",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (offsets.isCalibrated) {
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFF2E7D32).copy(alpha = 0.2f),
+                                contentColor = Color(0xFF2E7D32)
+                            ) {
+                                Text(
+                                    text = "CALIBRATED",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (!isExpanded) {
+                        val summaryText = if (isCalibrating) {
+                            "Calibrating... (${(progress * 100).toInt()}%)"
+                        } else if (offsets.isCalibrated) {
+                            "Window: %.1fs | A: [%.0f, %.0f, %.0f mg] | G: [%.0f, %.0f, %.0f mdps]".format(
+                                Locale.US,
+                                durationSec,
+                                offsets.accelX, offsets.accelY, offsets.accelZ,
+                                offsets.gyroX, offsets.gyroY, offsets.gyroZ
+                            )
+                        } else {
+                            "Window: %.1fs | Uncalibrated (Tap to calibrate)".format(Locale.US, durationSec)
+                        }
+                        Text(
+                            text = summaryText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "Sensor Calibration (Zero-Drift)",
+                        text = if (isExpanded) "▲" else "▼",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold
+                        color = MaterialTheme.colorScheme.primary
                     )
-                    if (offsets.isCalibrated) {
-                        Surface(
-                            shape = CircleShape,
-                            color = Color(0xFF2E7D32).copy(alpha = 0.2f),
-                            contentColor = Color(0xFF2E7D32)
-                        ) {
+                    InfoIconButton(onClick = { showInfoDialog = true })
+                }
+            }
+
+            // Expanded Content
+            if (isExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Calibration Window Slider Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Window: ${String.format(Locale.US, "%.1fs", durationSec)}",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (offsets.isCalibrated) {
                             Text(
-                                text = "CALIBRATED",
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                text = "Off: [A: %.0f,%.0f,%.0f mg | G: %.0f,%.0f,%.0f mdps]".format(
+                                    Locale.US,
+                                    offsets.accelX, offsets.accelY, offsets.accelZ,
+                                    offsets.gyroX, offsets.gyroY, offsets.gyroZ
+                                ),
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, fontFamily = FontFamily.Monospace),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                             )
                         }
                     }
-                }
-                InfoIconButton(onClick = { showInfoDialog = true })
-            }
 
-            // Calibration Window Slider
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Window: ${String.format(Locale.US, "%.1fs", durationSec)}",
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (offsets.isCalibrated) {
-                    Text(
-                        text = "Off: [A: %.0f,%.0f,%.0f mg | G: %.0f,%.0f,%.0f mdps]".format(
-                            Locale.US,
-                            offsets.accelX, offsets.accelY, offsets.accelZ,
-                            offsets.gyroX, offsets.gyroY, offsets.gyroZ
-                        ),
-                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                    )
-                }
-            }
-
-            Slider(
-                value = durationSec,
-                onValueChange = { viewModel.setCalibrationDurationSec(it) },
-                valueRange = 1f..5f,
-                steps = 7,
-                enabled = !isCalibrating,
-                modifier = Modifier.height(28.dp)
-            )
-
-            // Progress bar when calibrating
-            if (isCalibrating) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    LinearProgressIndicator(
-                        progress = progress,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                    )
-                    Text(
-                        text = "Calibrating... Keep sensor flat and steady! (${(progress * 100).toInt()}%)",
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            // Action Buttons: Calibrate and Reset
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = { viewModel.startCalibration() },
-                    enabled = !isCalibrating && connectionState == ConnectionState.Connected,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(30.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (offsets.isCalibrated) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(
-                        text = if (isCalibrating) "Calibrating..." else if (offsets.isCalibrated) "Re-Calibrate" else "Calibrate (Z-Up Flat)",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                    )
-                }
-
-                if (offsets.isCalibrated) {
-                    OutlinedButton(
-                        onClick = { viewModel.resetCalibration() },
+                    Slider(
+                        value = durationSec,
+                        onValueChange = { viewModel.setCalibrationDurationSec(it) },
+                        valueRange = 1f..5f,
+                        steps = 7,
                         enabled = !isCalibrating,
-                        modifier = Modifier.height(30.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        modifier = Modifier.height(28.dp)
+                    )
+
+                    // Progress bar when calibrating
+                    if (isCalibrating) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            LinearProgressIndicator(
+                                progress = progress,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                            )
+                            Text(
+                                text = "Calibrating... Keep sensor flat and steady! (${(progress * 100).toInt()}%)",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    // Action Buttons: Calibrate and Reset
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "Reset",
-                            style = MaterialTheme.typography.labelSmall
-                        )
+                        Button(
+                            onClick = { viewModel.startCalibration() },
+                            enabled = !isCalibrating && connectionState == ConnectionState.Connected,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (offsets.isCalibrated) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                            )
+                        ) {
+                            Text(
+                                text = if (isCalibrating) "Calibrating..." else if (offsets.isCalibrated) "Re-Calibrate" else "Calibrate (Z-Up Flat)",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+
+                        if (offsets.isCalibrated) {
+                            OutlinedButton(
+                                onClick = { viewModel.resetCalibration() },
+                                enabled = !isCalibrating,
+                                modifier = Modifier.height(32.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "Reset",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
                     }
                 }
             }
