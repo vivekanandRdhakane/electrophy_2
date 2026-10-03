@@ -191,10 +191,11 @@ fun Airplane3DView(
                 sub = if (rollDeg > 2f) "RIGHT" else if (rollDeg < -2f) "LEFT" else "LEVEL",
                 accentColor = if (abs(rollDeg) > 5f) Color(0xFFFBBF24) else Color(0xFF4ADE80)
             )
+            val headingDeg = (round((yawDeg % 360f + 360f) % 360f).toInt()) % 360
             TelemetryBadge(
                 label = "YAW / HDG",
-                value = String.format(Locale.US, "%03.0f°", (yawDeg % 360f + 360f) % 360f),
-                sub = getCompassHeading((yawDeg % 360f + 360f) % 360f),
+                value = String.format(Locale.US, "%03d°", headingDeg),
+                sub = getCompassHeading(headingDeg.toFloat()),
                 accentColor = Color(0xFFA855F7)
             )
             TelemetryBadge(
