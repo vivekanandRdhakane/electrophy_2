@@ -16,6 +16,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -262,6 +264,7 @@ fun ExperimentScreen(
                         title = title,
                         points = activeData,
                         timeWindowSec = timeWindowSec,
+                        isPaused = isPaused,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -1090,11 +1093,47 @@ private fun ExperimentChart(
     title: String,
     points: List<AxisPoint>,
     timeWindowSec: Float,
+    isPaused: Boolean,
     modifier: Modifier = Modifier
 ) {
     var showX by remember { mutableStateOf(true) }
     var showY by remember { mutableStateOf(true) }
     var showZ by remember { mutableStateOf(true) }
+
+    var viewEndTimeMs by remember { mutableStateOf<Float?>(null) }
+    var prevTimeWindowSec by remember { mutableStateOf(timeWindowSec) }
+
+    val maxTime = if (points.isNotEmpty()) points.last().time else 0f
+    val minTime = if (points.isNotEmpty()) points.first().time else 0f
+    val windowMs = timeWindowSec * 1000f
+    val totalSpan = maxTime - minTime
+
+    LaunchedEffect(isPaused) {
+        if (!isPaused) {
+            viewEndTimeMs = null
+        }
+    }
+
+    LaunchedEffect(timeWindowSec, isPaused) {
+        if (isPaused) {
+            val currentEnd = viewEndTimeMs ?: maxTime
+            val oldWindowMs = prevTimeWindowSec * 1000f
+            val currentCenter = currentEnd - oldWindowMs / 2f
+            val minEnd = if (totalSpan > windowMs) minTime + windowMs else maxTime
+            val newEnd = (currentCenter + windowMs / 2f).coerceIn(minEnd, maxTime)
+            viewEndTimeMs = newEnd
+            prevTimeWindowSec = timeWindowSec
+        } else {
+            prevTimeWindowSec = timeWindowSec
+        }
+    }
+
+    val endT = if (isPaused && viewEndTimeMs != null) viewEndTimeMs!! else maxTime
+    val startT = if (isPaused) {
+        endT - windowMs
+    } else {
+        (endT - windowMs).coerceAtLeast(0f)
+    }
 
     Column(modifier = modifier) {
         Row(
@@ -1104,11 +1143,21 @@ private fun ExperimentChart(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
+            Column {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                if (isPaused && totalSpan > windowMs) {
+                    Text(
+                        text = "↔ Slide to scroll [${String.format(Locale.US, "%.2fs", (startT - minTime) / 1000f)} - ${String.format(Locale.US, "%.2fs", (endT - minTime) / 1000f)} of ${String.format(Locale.US, "%.1fs", totalSpan / 1000f)}]",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF00E5FF),
+                        fontSize = 10.sp
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ClickableLegend(Color.Red, "X", showX) { showX = !showX }
                 ClickableLegend(Color.Green, "Y", showY) { showY = !showY }
@@ -1116,96 +1165,141 @@ private fun ExperimentChart(
             }
         }
         
-        AndroidView(
-            factory = { ctx ->
-                LineChart(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    description.isEnabled = false
-                    setTouchEnabled(false)
-                    isDragEnabled = false
-                    setScaleEnabled(false)
-                    setPinchZoom(false)
-                    setBackgroundColor(android.graphics.Color.parseColor("#101418"))
-                    
-                    xAxis.apply {
-                        textColor = android.graphics.Color.WHITE
-                        position = XAxis.XAxisPosition.BOTTOM
-                        setDrawGridLines(true)
-                        gridColor = android.graphics.Color.parseColor("#333333")
-                        valueFormatter = object : ValueFormatter() {
-                            override fun getFormattedValue(value: Float): String {
-                                val sec = value / 1000f
-                                return when {
-                                    timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
-                                    timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
-                                    else -> String.format(Locale.US, "%.1fs", sec)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .pointerInput(points, isPaused, timeWindowSec, viewEndTimeMs) {
+                    awaitPointerEventScope {
+                        var downPos = Offset.Zero
+                        var lastPos = Offset.Zero
+                        var isDragging = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (isPaused) {
+                                val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
+                                if (newlyPressed.size == 1) {
+                                    downPos = newlyPressed[0].position
+                                    lastPos = downPos
+                                    isDragging = false
+                                } else if (pressed.size == 1) {
+                                    val currentPos = pressed[0].position
+                                    val dx = currentPos.x - lastPos.x
+                                    val totalMovement = kotlin.math.abs(currentPos.x - downPos.x)
+                                    if (!isDragging && totalMovement > 8f) {
+                                        isDragging = true
+                                    }
+                                    if (isDragging) {
+                                        val chartWidth = size.width.toFloat().coerceAtLeast(1f)
+                                        val timeDelta = -dx * (windowMs / chartWidth)
+                                        val currentEnd = viewEndTimeMs ?: maxTime
+                                        val minEnd = if (totalSpan > windowMs) minTime + windowMs else maxTime
+                                        viewEndTimeMs = (currentEnd + timeDelta).coerceIn(minEnd, maxTime)
+                                        lastPos = currentPos
+                                        event.changes[0].consume()
+                                    }
+                                } else if (pressed.isEmpty()) {
+                                    isDragging = false
                                 }
                             }
                         }
                     }
-                    axisLeft.apply {
-                        textColor = android.graphics.Color.WHITE
-                        setDrawGridLines(true)
-                        gridColor = android.graphics.Color.parseColor("#333333")
-                    }
-                    axisRight.isEnabled = false
-                    legend.isEnabled = false
                 }
-            },
-            modifier = Modifier.fillMaxSize().padding(bottom = 4.dp),
-            update = { chart ->
-                chart.xAxis.valueFormatter = object : ValueFormatter() {
-                    override fun getFormattedValue(value: Float): String {
-                        val sec = value / 1000f
-                        return when {
-                            timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
-                            timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
-                            else -> String.format(Locale.US, "%.1fs", sec)
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    LineChart(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        description.isEnabled = false
+                        setTouchEnabled(false)
+                        isDragEnabled = false
+                        setScaleEnabled(false)
+                        setPinchZoom(false)
+                        setBackgroundColor(android.graphics.Color.parseColor("#101418"))
+                        
+                        xAxis.apply {
+                            textColor = android.graphics.Color.WHITE
+                            position = XAxis.XAxisPosition.BOTTOM
+                            setDrawGridLines(true)
+                            gridColor = android.graphics.Color.parseColor("#333333")
+                            valueFormatter = object : ValueFormatter() {
+                                override fun getFormattedValue(value: Float): String {
+                                    val sec = value / 1000f
+                                    return when {
+                                        timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                                        timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                                        else -> String.format(Locale.US, "%.1fs", sec)
+                                    }
+                                }
+                            }
+                        }
+                        axisLeft.apply {
+                            textColor = android.graphics.Color.WHITE
+                            setDrawGridLines(true)
+                            gridColor = android.graphics.Color.parseColor("#333333")
+                        }
+                        axisRight.isEnabled = false
+                        legend.isEnabled = false
+                    }
+                },
+                modifier = Modifier.fillMaxSize().padding(bottom = 4.dp),
+                update = { chart ->
+                    chart.xAxis.valueFormatter = object : ValueFormatter() {
+                        override fun getFormattedValue(value: Float): String {
+                            val sec = value / 1000f
+                            return when {
+                                timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                                timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                                else -> String.format(Locale.US, "%.1fs", sec)
+                            }
                         }
                     }
-                }
-                val maxTime = if (points.isNotEmpty()) points.last().time else 0f
-                val windowMs = timeWindowSec * 1000f
-                val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
 
-                val entriesX = filtered.map { Entry(it.time, it.x) }
-                val entriesY = filtered.map { Entry(it.time, it.y) }
-                val entriesZ = filtered.map { Entry(it.time, it.z) }
+                    chart.xAxis.axisMinimum = startT
+                    chart.xAxis.axisMaximum = if (!isPaused && endT < windowMs) windowMs else endT
 
-                val dataSets = mutableListOf<LineDataSet>()
-                if (showX) {
-                    dataSets.add(LineDataSet(entriesX, "X").apply {
-                        color = android.graphics.Color.RED
-                        setDrawCircles(false)
-                        lineWidth = 2f
-                        setDrawValues(false)
-                    })
-                }
-                if (showY) {
-                    dataSets.add(LineDataSet(entriesY, "Y").apply {
-                        color = android.graphics.Color.GREEN
-                        setDrawCircles(false)
-                        lineWidth = 2f
-                        setDrawValues(false)
-                    })
-                }
-                if (showZ) {
-                    dataSets.add(LineDataSet(entriesZ, "Z").apply {
-                        color = android.graphics.Color.BLUE
-                        setDrawCircles(false)
-                        lineWidth = 2f
-                        setDrawValues(false)
-                    })
-                }
+                    val filtered = getVisiblePoints(points, startT, endT)
 
-                chart.data = LineData(dataSets.map { it as ILineDataSet })
-                chart.notifyDataSetChanged()
-                chart.invalidate()
-            }
-        )
+                    val entriesX = filtered.map { Entry(it.time, it.x) }
+                    val entriesY = filtered.map { Entry(it.time, it.y) }
+                    val entriesZ = filtered.map { Entry(it.time, it.z) }
+
+                    val dataSets = mutableListOf<LineDataSet>()
+                    if (showX) {
+                        dataSets.add(LineDataSet(entriesX, "X").apply {
+                            color = android.graphics.Color.RED
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+                    if (showY) {
+                        dataSets.add(LineDataSet(entriesY, "Y").apply {
+                            color = android.graphics.Color.GREEN
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+                    if (showZ) {
+                        dataSets.add(LineDataSet(entriesZ, "Z").apply {
+                            color = android.graphics.Color.BLUE
+                            setDrawCircles(false)
+                            lineWidth = 2f
+                            setDrawValues(false)
+                        })
+                    }
+
+                    chart.data = LineData(dataSets.map { it as ILineDataSet })
+                    chart.notifyDataSetChanged()
+                    chart.invalidate()
+                }
+            )
+        }
     }
 }
 
