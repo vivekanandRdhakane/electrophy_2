@@ -106,10 +106,13 @@ fun Airplane3DView(
             val cx = width / 2f
             val cy = height / 2f
 
-            // 1. Draw Flight HUD / Artificial Horizon in background
-            drawArtificialHorizon(pitchDeg, rollDeg, width, height)
+            // 1. Draw Cockpit HUD (Artificial Horizon ladder & Reticle) only in Cockpit HUD mode
+            if (cameraMode == CameraViewMode.PILOT) {
+                drawArtificialHorizon(pitchDeg, rollDeg, width, height)
+                drawFlightReticle(cx, cy)
+            }
 
-            // 2. Draw 3D Airplane Mesh (if in Isometric or Top-Down mode)
+            // 2. Draw 3D Airplane Mesh (in Isometric and Top-Down mode)
             if (cameraMode != CameraViewMode.PILOT) {
                 drawAirplaneMesh(
                     yawDeg = yawDeg,
@@ -119,11 +122,6 @@ fun Airplane3DView(
                     cx = cx,
                     cy = cy
                 )
-            }
-
-            // 3. Draw Cockpit Reticle in Cockpit HUD mode
-            if (cameraMode == CameraViewMode.PILOT) {
-                drawFlightReticle(cx, cy)
             }
         }
 
