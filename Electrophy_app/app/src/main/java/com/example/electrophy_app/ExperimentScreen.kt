@@ -71,14 +71,9 @@ fun ExperimentScreen(
     var isOdrExpanded by remember { mutableStateOf(false) }
     var instructionsExpanded by remember { mutableStateOf(false) }
 
-    // 3D Airplane Attitude state
-    var pitchDeg by remember { mutableStateOf(0f) }
-    var rollDeg by remember { mutableStateOf(0f) }
-    var yawDeg by remember { mutableStateOf(0f) }
+    // 3D Airplane Attitude state from BleViewModel
+    val attitude by viewModel.attitude.collectAsState()
     var yawOffset by remember { mutableStateOf(0f) }
-    var gForce by remember { mutableStateOf(1f) }
-    var turnRateDps by remember { mutableStateOf(0f) }
-    var lastSensorCalcTimeMs by remember { mutableStateOf(0L) }
     var isGraphViewForced by remember { mutableStateOf(false) }
 
     var showOdrInfoDialog by remember { mutableStateOf(false) }
@@ -90,43 +85,6 @@ fun ExperimentScreen(
 
     LaunchedEffect(mode.id) {
         viewModel.applyExperimentMode(mode)
-    }
-
-    // Real-time complementary filter for 3D Airplane Attitude
-    LaunchedEffect(chartData.lowG.size, chartData.gyro.size) {
-        if (!mode.is3dAirplaneMode) return@LaunchedEffect
-        val latestAcc = chartData.lowG.lastOrNull() ?: return@LaunchedEffect
-        val latestGyro = chartData.gyro.lastOrNull()
-
-        val now = System.currentTimeMillis()
-        val dt = if (lastSensorCalcTimeMs > 0L) {
-            ((now - lastSensorCalcTimeMs) / 1000f).coerceIn(0.001f, 0.15f)
-        } else {
-            0.01f
-        }
-        lastSensorCalcTimeMs = now
-
-        // Total G-force from accelerometer (in mg, 1g = 1000mg)
-        val totalMg = sqrt(latestAcc.x * latestAcc.x + latestAcc.y * latestAcc.y + latestAcc.z * latestAcc.z)
-        gForce = (totalMg / 1000f).coerceIn(0f, 20f)
-
-        // Accelerometer tilt angles:
-        // When flat: Z is ~1000mg (up), Y is forward, X is right
-        val accRoll = Math.toDegrees(atan2(latestAcc.x.toDouble(), latestAcc.z.toDouble())).toFloat()
-        val accPitch = Math.toDegrees(atan2(-latestAcc.y.toDouble(), sqrt(latestAcc.x * latestAcc.x + latestAcc.z * latestAcc.z).toDouble())).toFloat()
-
-        // Gyro rates (convert mdps to deg/s)
-        val gxDps = (latestGyro?.x ?: 0f) / 1000f
-        val gyDps = (latestGyro?.y ?: 0f) / 1000f
-        val gzDps = (latestGyro?.z ?: 0f) / 1000f
-
-        turnRateDps = gzDps
-
-        // Complementary filter: 94% gyro integration + 6% accelerometer gravity vector
-        val alpha = 0.94f
-        pitchDeg = (alpha * (pitchDeg + gyDps * dt) + (1f - alpha) * accPitch).coerceIn(-89f, 89f)
-        rollDeg = (alpha * (rollDeg + gxDps * dt) + (1f - alpha) * accRoll).coerceIn(-180f, 180f)
-        yawDeg = (yawDeg + gzDps * dt)
     }
 
     val cutoffHz = viewModel.getCalculatedCutoffFrequency()
@@ -290,12 +248,12 @@ fun ExperimentScreen(
 
                 if (mode.is3dAirplaneMode && !isGraphViewForced) {
                     Airplane3DView(
-                        pitchDeg = pitchDeg,
-                        rollDeg = rollDeg,
-                        yawDeg = yawDeg - yawOffset,
-                        gForce = gForce,
-                        turnRateDps = turnRateDps,
-                        onZeroHeading = { yawOffset = yawDeg },
+                        pitchDeg = attitude.pitchDeg,
+                        rollDeg = attitude.rollDeg,
+                        yawDeg = attitude.yawDeg - yawOffset,
+                        gForce = attitude.gForce,
+                        turnRateDps = attitude.turnRateDps,
+                        onZeroHeading = { yawOffset = attitude.yawDeg },
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {

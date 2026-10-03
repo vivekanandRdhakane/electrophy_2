@@ -48,7 +48,7 @@ data class Vec3(val x: Float, val y: Float, val z: Float) {
     // Aircraft Euler Rotations (Y = forward, X = right, Z = up)
     fun rotateRoll(rollRad: Float): Vec3 {
         val c = cos(rollRad); val s = sin(rollRad)
-        return Vec3(x * c - z * s, y, x * s + z * c)
+        return Vec3(x * c + z * s, y, -x * s + z * c)
     }
 
     fun rotatePitch(pitchRad: Float): Vec3 {

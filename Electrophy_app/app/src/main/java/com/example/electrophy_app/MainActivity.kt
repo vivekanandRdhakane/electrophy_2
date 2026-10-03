@@ -81,7 +81,7 @@ import com.github.mikephil.charting.highlight.Highlight
 import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
 import com.github.mikephil.charting.listener.OnChartValueSelectedListener
 import com.github.mikephil.charting.utils.MPPointD
-import kotlin.math.abs
+import kotlin.math.*
 
 // UUIDs
 val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -110,6 +110,14 @@ data class ChartData(
     val lowG: List<AxisPoint> = emptyList(),
     val highG: List<AxisPoint> = emptyList(),
     val gyro: List<AxisPoint> = emptyList(),
+)
+
+data class AirplaneAttitude(
+    val pitchDeg: Float = 0f,
+    val rollDeg: Float = 0f,
+    val yawDeg: Float = 0f,
+    val gForce: Float = 1f,
+    val turnRateDps: Float = 0f
 )
 
 data class OdrOption(val label: String, val suffix: String)
@@ -535,6 +543,19 @@ class BleViewModel : ViewModel() {
     private val _chartData = MutableStateFlow(ChartData())
     val chartData: StateFlow<ChartData> = _chartData
 
+    private val _attitude = MutableStateFlow(AirplaneAttitude())
+    val attitude: StateFlow<AirplaneAttitude> = _attitude
+
+    private var attitudePitch = 0f
+    private var attitudeRoll = 0f
+    private var attitudeYaw = 0f
+    private var lastAttitudeCalcTimeMs = 0L
+
+    fun resetAttitudeYaw() {
+        attitudeYaw = 0f
+        _attitude.update { it.copy(yawDeg = 0f) }
+    }
+
     private val xyzRegex = Regex(
         """X\s*=\s*(-?\d+(?:\.\d+)?)\s+Y\s*=\s*(-?\d+(?:\.\d+)?)\s+Z\s*=\s*(-?\d+(?:\.\d+)?)"""
     )
@@ -862,6 +883,8 @@ class BleViewModel : ViewModel() {
     ) {
         if (newLowG.isEmpty() && newHighG.isEmpty() && newGyro.isEmpty()) return
 
+        updateAttitudeFromBatch(newLowG, newGyro)
+
         _chartData.update { current ->
             current.copy(
                 lowG = if (newLowG.isNotEmpty()) (current.lowG + newLowG).takeLast(MAX_CHART_POINTS) else current.lowG,
@@ -869,6 +892,79 @@ class BleViewModel : ViewModel() {
                 gyro = if (newGyro.isNotEmpty()) (current.gyro + newGyro).takeLast(MAX_CHART_POINTS) else current.gyro,
             )
         }
+    }
+
+    private fun updateAttitudeFromBatch(
+        lowGList: List<AxisPoint>,
+        gyroList: List<AxisPoint>
+    ) {
+        if (_isPaused.value) return
+        if (lowGList.isEmpty() && gyroList.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        val dtTotal = if (lastAttitudeCalcTimeMs > 0L) {
+            ((now - lastAttitudeCalcTimeMs) / 1000f).coerceIn(0.001f, 0.2f)
+        } else {
+            0.02f
+        }
+        lastAttitudeCalcTimeMs = now
+
+        val count = maxOf(lowGList.size, gyroList.size)
+        if (count == 0) return
+        val dtPerSample = dtTotal / count
+
+        for (i in 0 until count) {
+            val lg = lowGList.getOrNull(i) ?: lowGList.lastOrNull()
+            val gy = gyroList.getOrNull(i) ?: gyroList.lastOrNull()
+
+            val gxDps = (gy?.x ?: 0f) / 1000f // Pitch rate (around X)
+            val gyDps = (gy?.y ?: 0f) / 1000f // Roll rate (around Y)
+            val gzDps = (gy?.z ?: 0f) / 1000f // Yaw rate (around Z)
+
+            // Turn right (clockwise) increases heading
+            val turnRate = -gzDps
+            val deadbandTurnRate = if (abs(turnRate) < 0.25f) 0f else turnRate
+            attitudeYaw += deadbandTurnRate * dtPerSample
+
+            if (lg != null) {
+                val accRoll = Math.toDegrees(atan2(-lg.x.toDouble(), lg.z.toDouble())).toFloat()
+                val accPitch = Math.toDegrees(atan2(lg.y.toDouble(), sqrt((lg.x * lg.x + lg.z * lg.z).toDouble()))).toFloat()
+
+                if (gy != null) {
+                    val alpha = (0.4f / (0.4f + dtPerSample)).coerceIn(0.90f, 0.99f)
+                    attitudePitch = (alpha * (attitudePitch + gxDps * dtPerSample) + (1f - alpha) * accPitch).coerceIn(-89f, 89f)
+                    attitudeRoll = (alpha * (attitudeRoll + gyDps * dtPerSample) + (1f - alpha) * accRoll).coerceIn(-180f, 180f)
+                } else {
+                    attitudePitch = accPitch.coerceIn(-89f, 89f)
+                    attitudeRoll = accRoll.coerceIn(-180f, 180f)
+                }
+            } else if (gy != null) {
+                attitudePitch = (attitudePitch + gxDps * dtPerSample).coerceIn(-89f, 89f)
+                attitudeRoll = (attitudeRoll + gyDps * dtPerSample).coerceIn(-180f, 180f)
+            }
+        }
+
+        val latestLg = lowGList.lastOrNull()
+        val latestGy = gyroList.lastOrNull()
+        val gForce = if (latestLg != null) {
+            (sqrt((latestLg.x * latestLg.x + latestLg.y * latestLg.y + latestLg.z * latestLg.z).toDouble()).toFloat() / 1000f).coerceIn(0f, 20f)
+        } else 1f
+        val displayTurnRate = if (latestGy != null) -latestGy.z / 1000f else 0f
+
+        _attitude.value = AirplaneAttitude(
+            pitchDeg = attitudePitch,
+            rollDeg = attitudeRoll,
+            yawDeg = attitudeYaw,
+            gForce = gForce,
+            turnRateDps = displayTurnRate
+        )
+    }
+
+    private fun updateAttitudeSingle(lowG: AxisPoint?, gyro: AxisPoint?) {
+        updateAttitudeFromBatch(
+            lowGList = if (lowG != null) listOf(lowG) else emptyList(),
+            gyroList = if (gyro != null) listOf(gyro) else emptyList()
+        )
     }
 
     fun init(ctx: Context) {
@@ -1027,6 +1123,10 @@ class BleViewModel : ViewModel() {
         lastAssignedTimeMs = timeMs
         val timeFloat = timeMs.toFloat()
 
+        if (lowG != null || gyro != null) {
+            updateAttitudeSingle(lowG, gyro)
+        }
+
         _chartData.update { current ->
             current.copy(
                 lowG = if (lowG != null) (current.lowG + lowG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.lowG,
@@ -1067,6 +1167,7 @@ class BleViewModel : ViewModel() {
         _chartData.value = ChartData()
         resetSession()
         pendingData = ""
+        resetAttitudeYaw()
     }
 
     fun toggleRecording(ctx: Context) {
