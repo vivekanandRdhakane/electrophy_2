@@ -5,8 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -93,6 +96,11 @@ fun Airplane3DView(
     modifier: Modifier = Modifier
 ) {
     var cameraMode by remember { mutableStateOf(CameraViewMode.ISOMETRIC) }
+    var showGForceInfoDialog by remember { mutableStateOf(false) }
+
+    if (showGForceInfoDialog) {
+        GForceInfoDialog(onDismiss = { showGForceInfoDialog = false })
+    }
 
     Box(
         modifier = modifier
@@ -190,18 +198,27 @@ fun Airplane3DView(
                 accentColor = Color(0xFFA855F7)
             )
             TelemetryBadge(
-                label = "G-FORCE",
+                label = "G-FORCE ℹ",
                 value = String.format(Locale.US, "%.2f G", gForce),
                 sub = String.format(Locale.US, "%.0f°/s", turnRateDps),
-                accentColor = if (gForce > 1.8f) Color(0xFFEF4444) else Color(0xFF06B6D4)
+                accentColor = if (gForce > 1.8f) Color(0xFFEF4444) else Color(0xFF06B6D4),
+                onClick = { showGForceInfoDialog = true }
             )
         }
     }
 }
 
 @Composable
-private fun TelemetryBadge(label: String, value: String, sub: String, accentColor: Color) {
+private fun TelemetryBadge(
+    label: String,
+    value: String,
+    sub: String,
+    accentColor: Color,
+    onClick: (() -> Unit)? = null
+) {
     Surface(
+        onClick = onClick ?: {},
+        enabled = onClick != null,
         color = Color(0xD90F172A),
         shape = RoundedCornerShape(8.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, accentColor.copy(alpha = 0.4f)),
@@ -214,6 +231,176 @@ private fun TelemetryBadge(label: String, value: String, sub: String, accentColo
             Text(label, style = MaterialTheme.typography.labelSmall, color = Color.Gray, fontSize = 9.sp)
             Text(value, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accentColor, fontSize = 13.sp)
             Text(sub, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f), fontSize = 8.sp)
+        }
+    }
+}
+
+@Composable
+fun GForceInfoDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .background(Color(0xFF06B6D4).copy(alpha = 0.2f), CircleShape)
+                        .border(1.dp, Color(0xFF06B6D4).copy(alpha = 0.6f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "G",
+                        style = TextStyle(
+                            fontFamily = FontFamily.Serif,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = Color(0xFF06B6D4)
+                        )
+                    )
+                }
+                Text(
+                    text = "G-Force in Plane Mode",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "G-Force represents the total acceleration load factor acting on the aircraft, measured in multiples of standard Earth gravity (1 G = 1g ≈ 9.81 m/s²).",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // Mathematical Formula Card
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text(
+                            text = "Calculation Formula:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "G-Force = √(Ax² + Ay² + Az²) / 1000 mg",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Derived in real-time from the 3-axis Low-G accelerometer.",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Reference Table
+                Text(
+                    text = "Flight Condition Reference Table:",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    GForceTableRow(
+                        reading = "1.00 G",
+                        condition = "Level Flight / Steady State",
+                        desc = "Sensor is resting flat on the table or in steady cruise (experiencing standard 1g Earth gravity)."
+                    )
+                    GForceTableRow(
+                        reading = "> 1.00 G",
+                        condition = "Pulling Up / High Load",
+                        desc = "Steep banking turns, pulling out of a dive, sharp upward acceleration, or sudden maneuvers (1.5G – 3.0G+)."
+                    )
+                    GForceTableRow(
+                        reading = "< 1.00 G",
+                        condition = "Weightlessness / Dive",
+                        desc = "Pushing forward into a dive or rapid downward descent."
+                    )
+                    GForceTableRow(
+                        reading = "0.00 G",
+                        condition = "Free Fall",
+                        desc = "Complete weightlessness (e.g. dropping or tossing the sensor)."
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                )
+
+                // Additional details
+                Text(
+                    text = "• Color Indicator: Cyan (≤ 1.8 G) for normal flight; Red (> 1.8 G) for high-G load warning.\n" +
+                           "• Subtitle: Displays the instantaneous Turn Rate in °/s from the Gyroscope Z-axis.",
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Got it")
+            }
+        }
+    )
+}
+
+@Composable
+private fun GForceTableRow(reading: String, condition: String, desc: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        shape = RoundedCornerShape(6.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(7.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = reading,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0284C7)
+                )
+                Text(
+                    text = condition,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = desc,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
