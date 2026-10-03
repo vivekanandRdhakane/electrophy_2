@@ -1019,6 +1019,32 @@ class BleViewModel : ViewModel() {
         }
     }
 
+    fun applyExperimentMode(mode: ExperimentMode) {
+        selectMode(mode.streamMode)
+        mode.lowGOdr?.let { setLowGOdr(it) }
+        mode.highGOdr?.let { setHighGOdr(it) }
+        mode.gyroOdr?.let { setGyroOdr(it) }
+        mode.lowGRange?.let { setLowGRange(it) }
+        mode.highGRange?.let { setHighGRange(it) }
+        mode.gyroRange?.let { setGyroRange(it) }
+
+        setFilterEnabled(mode.filterEnabled)
+        if (mode.filterEnabled) {
+            setFilterAlpha(mode.filterAlpha)
+        }
+
+        setAutoTriggerEnabled(mode.autoTriggerEnabled)
+        if (mode.autoTriggerEnabled) {
+            setAutoTriggerAxis(mode.triggerAxis)
+            setAutoTriggerCondition(mode.triggerCondition)
+            setAutoTriggerThreshold(mode.triggerThreshold)
+            setAutoTriggerDelayMs(mode.triggerDelayMs)
+        }
+
+        setTimeWindow(mode.timeWindowSec)
+        clearLogs()
+    }
+
     fun clearLogs() {
         _logMessages.value = emptyList()
         _chartData.value = ChartData()
@@ -1075,8 +1101,51 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    BleAppScreen()
+                    AppRouter()
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppRouter(viewModel: BleViewModel = viewModel()) {
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        viewModel.init(context)
+    }
+
+    // "raw" = Raw Data Mode (Home), null = Experiment Picker, else = specific experiment
+    var currentScreen by remember { mutableStateOf<String?>("raw") }
+    var activeExperiment by remember { mutableStateOf<ExperimentMode?>(null) }
+
+    when {
+        currentScreen == null -> {
+            ExperimentPickerScreen(
+                onExperimentSelected = { mode ->
+                    activeExperiment = mode
+                    currentScreen = mode.id
+                },
+                onBackToRawData = {
+                    currentScreen = "raw"
+                }
+            )
+        }
+        currentScreen == "raw" -> {
+            BleAppScreen(
+                viewModel = viewModel,
+                onNavigateToExperiments = { currentScreen = null }
+            )
+        }
+        else -> {
+            val mode = activeExperiment
+            if (mode != null) {
+                ExperimentScreen(
+                    mode = mode,
+                    viewModel = viewModel,
+                    onBack = { currentScreen = null }
+                )
             }
         }
     }
@@ -1084,12 +1153,11 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
+fun BleAppScreen(
+    viewModel: BleViewModel = viewModel(),
+    onNavigateToExperiments: () -> Unit = {}
+) {
     val context = LocalContext.current
-
-    LaunchedEffect(Unit) {
-        viewModel.init(context)
-    }
 
     val connectionState by viewModel.connectionState.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
@@ -1206,6 +1274,9 @@ fun BleAppScreen(viewModel: BleViewModel = viewModel()) {
             TopAppBar(
                 title = { Text("ElectroPhy") },
                 actions = {
+                    TextButton(onClick = onNavigateToExperiments) {
+                        Text("🔬 Experiments", style = MaterialTheme.typography.labelMedium)
+                    }
                     val color = when (connectionState) {
                         ConnectionState.Connected -> Color.Green
                         ConnectionState.Scanning -> Color.Yellow
@@ -2342,7 +2413,7 @@ private fun ClickableLegend(color: Color, label: String, visible: Boolean, onCli
 }
 
 @Composable
-private fun CompactOdrDropdown(
+fun CompactOdrDropdown(
     title: String,
     options: List<OdrOption>,
     selectedSuffix: String,
@@ -2423,7 +2494,7 @@ private fun CompactOdrDropdown(
 
 
 @Composable
-private fun CompactRangeDropdown(
+fun CompactRangeDropdown(
     title: String,
     options: List<RangeOption>,
     selectedSuffix: String,
@@ -2502,7 +2573,7 @@ private fun CompactRangeDropdown(
 }
 
 @Composable
-private fun InfoIconButton(onClick: () -> Unit) {
+fun InfoIconButton(onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(20.dp)
@@ -2525,7 +2596,7 @@ private fun InfoIconButton(onClick: () -> Unit) {
 }
 
 @Composable
-private fun InfoAlertDialog(
+fun InfoAlertDialog(
     title: String,
     infoText: String,
     onDismiss: () -> Unit
