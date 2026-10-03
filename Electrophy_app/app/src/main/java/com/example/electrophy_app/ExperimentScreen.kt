@@ -1143,21 +1143,11 @@ private fun ExperimentChart(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                if (isPaused && totalSpan > windowMs) {
-                    Text(
-                        text = "↔ Slide to scroll [${String.format(Locale.US, "%.2fs", (startT - minTime) / 1000f)} - ${String.format(Locale.US, "%.2fs", (endT - minTime) / 1000f)} of ${String.format(Locale.US, "%.1fs", totalSpan / 1000f)}]",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF00E5FF),
-                        fontSize = 10.sp
-                    )
-                }
-            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ClickableLegend(Color.Red, "X", showX) { showX = !showX }
                 ClickableLegend(Color.Green, "Y", showY) { showY = !showY }
@@ -1169,43 +1159,6 @@ private fun ExperimentChart(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .pointerInput(points, isPaused, timeWindowSec, viewEndTimeMs) {
-                    awaitPointerEventScope {
-                        var downPos = Offset.Zero
-                        var lastPos = Offset.Zero
-                        var isDragging = false
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val pressed = event.changes.filter { it.pressed }
-                            if (isPaused) {
-                                val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
-                                if (newlyPressed.size == 1) {
-                                    downPos = newlyPressed[0].position
-                                    lastPos = downPos
-                                    isDragging = false
-                                } else if (pressed.size == 1) {
-                                    val currentPos = pressed[0].position
-                                    val dx = currentPos.x - lastPos.x
-                                    val totalMovement = kotlin.math.abs(currentPos.x - downPos.x)
-                                    if (!isDragging && totalMovement > 8f) {
-                                        isDragging = true
-                                    }
-                                    if (isDragging) {
-                                        val chartWidth = size.width.toFloat().coerceAtLeast(1f)
-                                        val timeDelta = -dx * (windowMs / chartWidth)
-                                        val currentEnd = viewEndTimeMs ?: maxTime
-                                        val minEnd = if (totalSpan > windowMs) minTime + windowMs else maxTime
-                                        viewEndTimeMs = (currentEnd + timeDelta).coerceIn(minEnd, maxTime)
-                                        lastPos = currentPos
-                                        event.changes[0].consume()
-                                    }
-                                } else if (pressed.isEmpty()) {
-                                    isDragging = false
-                                }
-                            }
-                        }
-                    }
-                }
         ) {
             AndroidView(
                 factory = { ctx ->
@@ -1299,6 +1252,51 @@ private fun ExperimentChart(
                     chart.invalidate()
                 }
             )
+        }
+
+        if (isPaused) {
+            val canSlide = totalSpan > windowMs
+            val currentEnd = (viewEndTimeMs ?: maxTime).coerceIn(
+                if (canSlide) minTime + windowMs else maxTime,
+                maxTime
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "◄ Past",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (canSlide) Color(0xFF00E5FF) else Color.Gray,
+                    fontSize = 11.sp
+                )
+                Slider(
+                    value = if (canSlide) currentEnd else 1f,
+                    onValueChange = { viewEndTimeMs = it },
+                    valueRange = if (canSlide) (minTime + windowMs)..maxTime else 0f..1f,
+                    enabled = canSlide,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                        .padding(horizontal = 6.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF00E5FF),
+                        activeTrackColor = Color(0xFF00E5FF),
+                        inactiveTrackColor = Color(0xFF444444),
+                        disabledThumbColor = Color.DarkGray,
+                        disabledActiveTrackColor = Color.DarkGray,
+                        disabledInactiveTrackColor = Color(0xFF222222)
+                    )
+                )
+                Text(
+                    text = "Recent ►",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (canSlide) Color(0xFF00E5FF) else Color.Gray,
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }

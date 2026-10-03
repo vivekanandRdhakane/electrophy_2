@@ -2617,21 +2617,11 @@ private fun SensorChart(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                if (isPaused && totalSpan > windowMs) {
-                    Text(
-                        text = "↔ Slide to scroll [${String.format(Locale.US, "%.2fs", (startT - minTime) / 1000f)} - ${String.format(Locale.US, "%.2fs", (endT - minTime) / 1000f)} of ${String.format(Locale.US, "%.1fs", totalSpan / 1000f)}]",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF00E5FF),
-                        fontSize = 10.sp
-                    )
-                }
-            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ClickableLegend(Color.Red, "X", showX) { showX = !showX }
                 ClickableLegend(Color.Green, "Y", showY) { showY = !showY }
@@ -2643,12 +2633,8 @@ private fun SensorChart(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .pointerInput(points, isPaused, timeWindowSec, viewEndTimeMs) {
+                .pointerInput(points, isPaused, timeWindowSec) {
                     awaitPointerEventScope {
-                        var downPos = Offset.Zero
-                        var lastPos = Offset.Zero
-                        var isDragging = false
-
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
@@ -2658,7 +2644,6 @@ private fun SensorChart(
                                 if (isPaused) {
                                     val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
                                     if (pressed.size >= 2) {
-                                        isDragging = false
                                         val p1 = pressed[0].position
                                         val p2 = pressed[1].position
                                         val h1 = chart.getHighlightByTouchPoint(p1.x, p1.y)
@@ -2669,38 +2654,20 @@ private fun SensorChart(
                                         }
                                         event.changes.forEach { it.consume() }
                                     } else if (newlyPressed.size == 1) {
-                                        downPos = newlyPressed[0].position
-                                        lastPos = downPos
-                                        isDragging = false
-                                    } else if (pressed.size == 1) {
-                                        val currentPos = pressed[0].position
-                                        val dx = currentPos.x - lastPos.x
-                                        val totalMovement = kotlin.math.abs(currentPos.x - downPos.x)
-
-                                        if (!isDragging && totalMovement > 8f) {
-                                            isDragging = true
+                                        val pos = newlyPressed[0].position
+                                        val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                        if (h != null) {
+                                            cursor1 = Entry(h.x, h.y)
+                                            cursor2 = null
                                         }
-
-                                        if (isDragging) {
-                                            val chartWidth = size.width.toFloat().coerceAtLeast(1f)
-                                            val timeDelta = -dx * (windowMs / chartWidth)
-                                            val currentEnd = viewEndTimeMs ?: maxTime
-                                            val minEnd = if (totalSpan > windowMs) minTime + windowMs else maxTime
-                                            viewEndTimeMs = (currentEnd + timeDelta).coerceIn(minEnd, maxTime)
-                                            lastPos = currentPos
-                                            event.changes[0].consume()
+                                        newlyPressed[0].consume()
+                                    } else if (pressed.size == 1 && cursor2 == null) {
+                                        val pos = pressed[0].position
+                                        val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                        if (h != null) {
+                                            cursor1 = Entry(h.x, h.y)
                                         }
-                                    } else if (pressed.isEmpty()) {
-                                        val released = event.changes.filter { !it.pressed && it.previousPressed }
-                                        if (!isDragging && released.isNotEmpty()) {
-                                            val pos = released[0].position
-                                            val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
-                                            if (h != null) {
-                                                cursor1 = Entry(h.x, h.y)
-                                                cursor2 = null
-                                            }
-                                        }
-                                        isDragging = false
+                                        pressed[0].consume()
                                     }
                                 } else {
                                     if (pressed.size == 1) {
@@ -2710,6 +2677,7 @@ private fun SensorChart(
                                         val valD = chart.getValuesByTouchPoint(pos.x + offsetX, pos.y + offsetY, YAxis.AxisDependency.LEFT)
                                         cursor1 = Entry(valD.x.toFloat(), valD.y.toFloat())
                                         cursor2 = null
+                                        pressed[0].consume()
                                     }
                                 }
                             }
@@ -2920,7 +2888,7 @@ private fun SensorChart(
 
                         withStyle(SpanStyle(color = Color(0xFFFF4081))) { append(String.format(Locale.US, "Slope=%.2f/s", slope)) }
                     } else {
-                        withStyle(SpanStyle(color = Color.Gray)) { append("Paused: Tap for C1 | ↔ Slide to scroll") }
+                        withStyle(SpanStyle(color = Color.Gray)) { append("Paused: Tap/Drag for C1 (or 2-finger touch for C1 & C2)") }
                     }
                 }
             }
@@ -2933,6 +2901,51 @@ private fun SensorChart(
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 2.dp)
         )
+
+        if (isPaused) {
+            val canSlide = totalSpan > windowMs
+            val currentEnd = (viewEndTimeMs ?: maxTime).coerceIn(
+                if (canSlide) minTime + windowMs else maxTime,
+                maxTime
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "◄ Past",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (canSlide) Color(0xFF00E5FF) else Color.Gray,
+                    fontSize = 11.sp
+                )
+                Slider(
+                    value = if (canSlide) currentEnd else 1f,
+                    onValueChange = { viewEndTimeMs = it },
+                    valueRange = if (canSlide) (minTime + windowMs)..maxTime else 0f..1f,
+                    enabled = canSlide,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                        .padding(horizontal = 6.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF00E5FF),
+                        activeTrackColor = Color(0xFF00E5FF),
+                        inactiveTrackColor = Color(0xFF444444),
+                        disabledThumbColor = Color.DarkGray,
+                        disabledActiveTrackColor = Color.DarkGray,
+                        disabledInactiveTrackColor = Color(0xFF222222)
+                    )
+                )
+                Text(
+                    text = "Recent ►",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (canSlide) Color(0xFF00E5FF) else Color.Gray,
+                    fontSize = 11.sp
+                )
+            }
+        }
     }
 }
 
