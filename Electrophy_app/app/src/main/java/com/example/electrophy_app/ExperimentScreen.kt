@@ -379,15 +379,17 @@ fun ExperimentScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            val currentLabel = timeWindowOptions.minByOrNull { kotlin.math.abs(it.seconds - timeWindowSec) }?.label ?: if (timeWindowSec < 1f) "${(timeWindowSec * 1000).toInt()} ms" else "${timeWindowSec}s"
                             Text(
-                                text = "Time Window: ${timeWindowOptions.find { it.seconds == timeWindowSec }?.label ?: "${timeWindowSec}s"}",
+                                text = "Time Window: $currentLabel",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             InfoIconButton(onClick = { showTimeWindowInfoDialog = true })
                         }
 
-                        val currentIndex = timeWindowOptions.indexOfFirst { it.seconds == timeWindowSec }.let { if (it < 0) 2 else it }
+                        val currentIndex = timeWindowOptions.indexOfFirst { kotlin.math.abs(it.seconds - timeWindowSec) < 0.001f }
+                            .let { if (it < 0) timeWindowOptions.indexOfFirst { opt -> opt.seconds == 5f }.coerceAtLeast(0) else it }
                         Slider(
                             value = currentIndex.toFloat(),
                             onValueChange = { newValue ->
@@ -1063,7 +1065,7 @@ fun ExperimentScreen(
     if (showTimeWindowInfoDialog) {
         InfoAlertDialog(
             title = "Time Window",
-            infoText = "• Time Window controls the horizontal time duration displayed on the live sensor chart (ranging from 1 sec to 30 sec).\n\n" +
+            infoText = "• Time Window controls the horizontal time duration displayed on the live sensor chart (ranging from 5 ms to 30 sec).\n\n" +
                     "• Drag the slider to expand or compress the horizontal time scale in real-time.",
             onDismiss = { showTimeWindowInfoDialog = false }
         )
@@ -1135,7 +1137,12 @@ private fun ExperimentChart(
                         gridColor = android.graphics.Color.parseColor("#333333")
                         valueFormatter = object : ValueFormatter() {
                             override fun getFormattedValue(value: Float): String {
-                                return String.format(Locale.US, "%.1fs", value / 1000f)
+                                val sec = value / 1000f
+                                return when {
+                                    timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                                    timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                                    else -> String.format(Locale.US, "%.1fs", sec)
+                                }
                             }
                         }
                     }
@@ -1150,6 +1157,16 @@ private fun ExperimentChart(
             },
             modifier = Modifier.fillMaxSize().padding(bottom = 4.dp),
             update = { chart ->
+                chart.xAxis.valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float): String {
+                        val sec = value / 1000f
+                        return when {
+                            timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                            timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                            else -> String.format(Locale.US, "%.1fs", sec)
+                        }
+                    }
+                }
                 val maxTime = if (points.isNotEmpty()) points.last().time else 0f
                 val windowMs = timeWindowSec * 1000f
                 val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }

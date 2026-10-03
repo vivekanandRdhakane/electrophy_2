@@ -137,6 +137,13 @@ data class RangeOption(val label: String, val suffix: String)
 data class TimeWindowOption(val label: String, val seconds: Float)
 
 val timeWindowOptions = listOf(
+    TimeWindowOption("5 ms", 0.005f),
+    TimeWindowOption("10 ms", 0.010f),
+    TimeWindowOption("30 ms", 0.030f),
+    TimeWindowOption("50 ms", 0.050f),
+    TimeWindowOption("100 ms", 0.100f),
+    TimeWindowOption("300 ms", 0.300f),
+    TimeWindowOption("500 ms", 0.500f),
     TimeWindowOption("1 sec", 1f),
     TimeWindowOption("3 sec", 3f),
     TimeWindowOption("5 sec", 5f),
@@ -1799,15 +1806,17 @@ fun BleAppScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val currentLabel = timeWindowOptions.minByOrNull { kotlin.math.abs(it.seconds - timeWindowSec) }?.label ?: if (timeWindowSec < 1f) "${(timeWindowSec * 1000).toInt()} ms" else "${timeWindowSec}s"
                         Text(
-                            text = "Time Window: ${timeWindowOptions.find { it.seconds == timeWindowSec }?.label ?: "${timeWindowSec}s"}",
+                            text = "Time Window: $currentLabel",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
                         InfoIconButton(onClick = { showTimeWindowInfoDialog = true })
                     }
 
-                    val currentIndex = timeWindowOptions.indexOfFirst { it.seconds == timeWindowSec }.let { if (it < 0) 2 else it }
+                    val currentIndex = timeWindowOptions.indexOfFirst { kotlin.math.abs(it.seconds - timeWindowSec) < 0.001f }
+                        .let { if (it < 0) timeWindowOptions.indexOfFirst { opt -> opt.seconds == 5f }.coerceAtLeast(0) else it }
                     Slider(
                         value = currentIndex.toFloat(),
                         onValueChange = { newValue ->
@@ -2426,7 +2435,7 @@ fun BleAppScreen(
             if (showTimeWindowInfoDialog) {
                 InfoAlertDialog(
                     title = "Time Window",
-                    infoText = "• Time Window controls the horizontal time duration displayed on the live sensor chart (ranging from 1 sec to 30 sec).\n\n" +
+                    infoText = "• Time Window controls the horizontal time duration displayed on the live sensor chart (ranging from 5 ms to 30 sec).\n\n" +
                             "• Drag the slider to expand or compress the horizontal time scale in real-time.",
                     onDismiss = { showTimeWindowInfoDialog = false }
                 )
@@ -2635,7 +2644,12 @@ private fun SensorChart(
                             gridColor = android.graphics.Color.parseColor("#333333")
                             valueFormatter = object : ValueFormatter() {
                                 override fun getFormattedValue(value: Float): String {
-                                    return String.format(Locale.US, "%.1fs", value / 1000f)
+                                    val sec = value / 1000f
+                                    return when {
+                                        timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                                        timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                                        else -> String.format(Locale.US, "%.1fs", sec)
+                                    }
                                 }
                             }
                         }
@@ -2653,6 +2667,16 @@ private fun SensorChart(
                 modifier = Modifier.fillMaxSize(),
                 update = { chart ->
                     chartRef.value = chart
+                    chart.xAxis.valueFormatter = object : ValueFormatter() {
+                        override fun getFormattedValue(value: Float): String {
+                            val sec = value / 1000f
+                            return when {
+                                timeWindowSec < 0.1f -> String.format(Locale.US, "%.3fs", sec)
+                                timeWindowSec < 1f -> String.format(Locale.US, "%.2fs", sec)
+                                else -> String.format(Locale.US, "%.1fs", sec)
+                            }
+                        }
+                    }
                     val maxTime = if (points.isNotEmpty()) points.last().time else 0f
                     val windowMs = timeWindowSec * 1000f
                     val filtered = if (points.isEmpty()) emptyList() else points.filter { it.time >= maxTime - windowMs }
@@ -2751,12 +2775,18 @@ private fun SensorChart(
         }
 
         // Cursor details in the space below X axis
-        val detailsContent = remember(cursor1, cursor2, isPaused) {
+        val detailsContent = remember(cursor1, cursor2, isPaused, timeWindowSec) {
             buildAnnotatedString {
                 if (!isPaused) {
                     if (cursor1 != null) {
                         withStyle(SpanStyle(color = Color.LightGray)) { append("Cursor: ") }
-                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append(String.format(Locale.US, "t = %.2fs", cursor1!!.x / 1000f)) }
+                        val sec = cursor1!!.x / 1000f
+                        val tStr = when {
+                            timeWindowSec < 0.1f -> String.format(Locale.US, "t = %.3fs", sec)
+                            timeWindowSec < 1f -> String.format(Locale.US, "t = %.2fs", sec)
+                            else -> String.format(Locale.US, "t = %.2fs", sec)
+                        }
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append(tStr) }
                         withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
                         withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(String.format(Locale.US, "Y = %.2f", cursor1!!.y)) }
                     } else {
@@ -2765,7 +2795,9 @@ private fun SensorChart(
                 } else {
                     if (cursor1 != null && cursor2 == null) {
                         withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
-                        withStyle(SpanStyle(color = Color.White)) { append(String.format(Locale.US, "t = %.2fs, v = %.2f", cursor1!!.x / 1000f, cursor1!!.y)) }
+                        val sec = cursor1!!.x / 1000f
+                        val tStr = if (timeWindowSec < 0.1f) String.format(Locale.US, "t = %.3fs, v = %.2f", sec, cursor1!!.y) else String.format(Locale.US, "t = %.2fs, v = %.2f", sec, cursor1!!.y)
+                        withStyle(SpanStyle(color = Color.White)) { append(tStr) }
                         withStyle(SpanStyle(color = Color.Gray)) { append(" (Tap/Touch for C2)") }
                     } else if (cursor1 != null && cursor2 != null) {
                         val dt = (cursor2!!.x - cursor1!!.x) / 1000f
@@ -2773,14 +2805,21 @@ private fun SensorChart(
                         val slope = if (dt != 0f) dv / dt else 0f
 
                         withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
-                        append(String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y))
+                        val t1Str = if (timeWindowSec < 0.1f) String.format(Locale.US, "t=%.3fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y) else String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y)
+                        append(t1Str)
                         withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
 
                         withStyle(SpanStyle(color = Color(0xFFFFAB40))) { append("C2: ") }
-                        append(String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y))
+                        val t2Str = if (timeWindowSec < 0.1f) String.format(Locale.US, "t=%.3fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y) else String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y)
+                        append(t2Str)
                         withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
 
-                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(String.format(Locale.US, "Δt=%.2fs, Δv=%.2f", dt, dv)) }
+                        val dtStr = if (kotlin.math.abs(dt) < 0.1f) {
+                            String.format(Locale.US, "Δt=%.1fms, Δv=%.2f", dt * 1000f, dv)
+                        } else {
+                            String.format(Locale.US, "Δt=%.2fs, Δv=%.2f", dt, dv)
+                        }
+                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(dtStr) }
                         withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
 
                         withStyle(SpanStyle(color = Color(0xFFFF4081))) { append(String.format(Locale.US, "Slope=%.2f/s", slope)) }
