@@ -96,6 +96,7 @@ enum class GraphMode(val label: String, val command: String) {
     HIGH_G("High-G Accel", "high_acc"),
     BOTH_ACC("Both Accel", "both_acc"),
     GYRO("Gyro", "only_gyro"),
+    ALL("All Sensors", "all"),
 }
 
 private const val MAX_CHART_POINTS = 1500
@@ -326,6 +327,11 @@ class BleViewModel : ViewModel() {
             GraphMode.BOTH_ACC -> {
                 val f1 = parseOdrToHz(_lowGOdr.value)
                 val f2 = parseOdrToHz(_highGOdr.value)
+                if (f1 > 0f && f2 > 0f) minOf(f1, f2) else maxOf(f1, f2)
+            }
+            GraphMode.ALL -> {
+                val f1 = parseOdrToHz(_lowGOdr.value)
+                val f2 = parseOdrToHz(_gyroOdr.value)
                 if (f1 > 0f && f2 > 0f) minOf(f1, f2) else maxOf(f1, f2)
             }
         }
@@ -774,6 +780,10 @@ class BleViewModel : ViewModel() {
                 checkAutoTrigger(filteredLowG)
                 checkAutoTrigger(filteredHighG)
             }
+            GraphMode.ALL -> {
+                checkAutoTrigger(filteredLowG)
+                checkAutoTrigger(filteredGyro)
+            }
         }
 
         appendBatchPoints(filteredLowG, filteredHighG, filteredGyro)
@@ -972,6 +982,13 @@ class BleViewModel : ViewModel() {
             } else {
                 false
             }
+            GraphMode.ALL -> if (filtered.size >= 3) {
+                appendPoints(lowG = filtered[0], highG = filtered[1], gyro = filtered[2])
+                true
+            } else if (filtered.size >= 2) {
+                appendPoints(lowG = filtered[0], gyro = filtered[1])
+                true
+            } else false
         }
     }
 
@@ -1219,6 +1236,7 @@ fun BleAppScreen(
         GraphMode.HIGH_G -> "High-G: $highGOdrLabel"
         GraphMode.GYRO -> "Gyro: $gyroOdrLabel"
         GraphMode.BOTH_ACC -> "Low-G: $lowGOdrLabel, High-G: $highGOdrLabel"
+        GraphMode.ALL -> "Low-G: $lowGOdrLabel, Gyro: $gyroOdrLabel"
     }
 
     val rangeText = when (selectedMode) {
@@ -1226,6 +1244,7 @@ fun BleAppScreen(
         GraphMode.HIGH_G -> "High-G: $highGRangeLabel"
         GraphMode.GYRO -> "Gyro: $gyroRangeLabel"
         GraphMode.BOTH_ACC -> "Low-G: $lowGRangeLabel, High-G: $highGRangeLabel"
+        GraphMode.ALL -> "Low-G: $lowGRangeLabel, Gyro: $gyroRangeLabel"
     }
 
     val odrRangeSummary = "ODR: $odrText | Range: $rangeText"
@@ -1415,6 +1434,22 @@ fun BleAppScreen(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    GraphMode.ALL -> Column(modifier = Modifier.fillMaxSize()) {
+                        SensorChart(
+                            title = "Low-G Accelerometer (mg)",
+                            points = chartData.lowG,
+                            timeWindowSec = timeWindowSec,
+                            isPaused = isPaused,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SensorChart(
+                            title = "Gyroscope (mdps)",
+                            points = chartData.gyro,
+                            timeWindowSec = timeWindowSec,
+                            isPaused = isPaused,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             }
 
@@ -1597,6 +1632,31 @@ fun BleAppScreen(
                                         }
                                     }
                                 }
+                                GraphMode.ALL -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            CompactOdrDropdown(
+                                                title = "Low-G",
+                                                options = lowGOdrOptions,
+                                                selectedSuffix = lowGOdr,
+                                                enabled = true,
+                                                onSelected = { viewModel.setLowGOdr(it) }
+                                            )
+                                        }
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            CompactOdrDropdown(
+                                                title = "Gyro",
+                                                options = gyroOdrOptions,
+                                                selectedSuffix = gyroOdr,
+                                                enabled = true,
+                                                onSelected = { viewModel.setGyroOdr(it) }
+                                            )
+                                        }
+                                    }
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(2.dp))
@@ -1678,6 +1738,31 @@ fun BleAppScreen(
                                                 selectedSuffix = highGRange,
                                                 enabled = true,
                                                 onSelected = { viewModel.setHighGRange(it) }
+                                            )
+                                        }
+                                    }
+                                }
+                                GraphMode.ALL -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            CompactRangeDropdown(
+                                                title = "Low-G",
+                                                options = lowGRangeOptions,
+                                                selectedSuffix = lowGRange,
+                                                enabled = true,
+                                                onSelected = { viewModel.setLowGRange(it) }
+                                            )
+                                        }
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            CompactRangeDropdown(
+                                                title = "Gyro",
+                                                options = gyroRangeOptions,
+                                                selectedSuffix = gyroRange,
+                                                enabled = true,
+                                                onSelected = { viewModel.setGyroRange(it) }
                                             )
                                         }
                                     }

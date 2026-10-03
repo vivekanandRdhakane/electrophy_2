@@ -28,9 +28,9 @@ import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.github.mikephil.charting.formatter.ValueFormatter
 import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
+import androidx.compose.foundation.shape.RoundedCornerShape
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.sqrt
+import kotlin.math.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,6 +71,16 @@ fun ExperimentScreen(
     var isOdrExpanded by remember { mutableStateOf(false) }
     var instructionsExpanded by remember { mutableStateOf(false) }
 
+    // 3D Airplane Attitude state
+    var pitchDeg by remember { mutableStateOf(0f) }
+    var rollDeg by remember { mutableStateOf(0f) }
+    var yawDeg by remember { mutableStateOf(0f) }
+    var yawOffset by remember { mutableStateOf(0f) }
+    var gForce by remember { mutableStateOf(1f) }
+    var turnRateDps by remember { mutableStateOf(0f) }
+    var lastSensorCalcTimeMs by remember { mutableStateOf(0L) }
+    var isGraphViewForced by remember { mutableStateOf(false) }
+
     var showOdrInfoDialog by remember { mutableStateOf(false) }
     var showTimeWindowInfoDialog by remember { mutableStateOf(false) }
     var showFilterInfoDialog by remember { mutableStateOf(false) }
@@ -80,6 +90,43 @@ fun ExperimentScreen(
 
     LaunchedEffect(mode.id) {
         viewModel.applyExperimentMode(mode)
+    }
+
+    // Real-time complementary filter for 3D Airplane Attitude
+    LaunchedEffect(chartData.lowG.size, chartData.gyro.size) {
+        if (!mode.is3dAirplaneMode) return@LaunchedEffect
+        val latestAcc = chartData.lowG.lastOrNull() ?: return@LaunchedEffect
+        val latestGyro = chartData.gyro.lastOrNull()
+
+        val now = System.currentTimeMillis()
+        val dt = if (lastSensorCalcTimeMs > 0L) {
+            ((now - lastSensorCalcTimeMs) / 1000f).coerceIn(0.001f, 0.15f)
+        } else {
+            0.01f
+        }
+        lastSensorCalcTimeMs = now
+
+        // Total G-force from accelerometer (in mg, 1g = 1000mg)
+        val totalMg = sqrt(latestAcc.x * latestAcc.x + latestAcc.y * latestAcc.y + latestAcc.z * latestAcc.z)
+        gForce = (totalMg / 1000f).coerceIn(0f, 20f)
+
+        // Accelerometer tilt angles:
+        // When flat: Z is ~1000mg (up), Y is forward, X is right
+        val accRoll = Math.toDegrees(atan2(latestAcc.x.toDouble(), latestAcc.z.toDouble())).toFloat()
+        val accPitch = Math.toDegrees(atan2(-latestAcc.y.toDouble(), sqrt(latestAcc.x * latestAcc.x + latestAcc.z * latestAcc.z).toDouble())).toFloat()
+
+        // Gyro rates (convert mdps to deg/s)
+        val gxDps = (latestGyro?.x ?: 0f) / 1000f
+        val gyDps = (latestGyro?.y ?: 0f) / 1000f
+        val gzDps = (latestGyro?.z ?: 0f) / 1000f
+
+        turnRateDps = gzDps
+
+        // Complementary filter: 94% gyro integration + 6% accelerometer gravity vector
+        val alpha = 0.94f
+        pitchDeg = (alpha * (pitchDeg + gyDps * dt) + (1f - alpha) * accPitch).coerceIn(-89f, 89f)
+        rollDeg = (alpha * (rollDeg + gxDps * dt) + (1f - alpha) * accRoll).coerceIn(-180f, 180f)
+        yawDeg = (yawDeg + gzDps * dt)
     }
 
     val cutoffHz = viewModel.getCalculatedCutoffFrequency()
@@ -108,6 +155,7 @@ fun ExperimentScreen(
         GraphMode.HIGH_G -> "High-G: $highGOdrLabel"
         GraphMode.GYRO -> "Gyro: $gyroOdrLabel"
         GraphMode.BOTH_ACC -> "Low-G: $lowGOdrLabel, High-G: $highGOdrLabel"
+        GraphMode.ALL -> "Low-G: $lowGOdrLabel, Gyro: $gyroOdrLabel"
     }
 
     val rangeText = when (selectedMode) {
@@ -115,6 +163,7 @@ fun ExperimentScreen(
         GraphMode.HIGH_G -> "High-G: $highGRangeLabel"
         GraphMode.GYRO -> "Gyro: $gyroRangeLabel"
         GraphMode.BOTH_ACC -> "Low-G: $lowGRangeLabel, High-G: $highGRangeLabel"
+        GraphMode.ALL -> "Low-G: $lowGRangeLabel, Gyro: $gyroRangeLabel"
     }
 
     val odrRangeSummary = "ODR: $odrText | Range: $rangeText"
@@ -223,10 +272,10 @@ fun ExperimentScreen(
                 }
             }
 
-            // Real-time Chart Area (Weighted so controls below fit nicely)
+            // Real-time View Area (3D Airplane or Chart)
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .weight(1.15f)
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 2.dp)
                     .background(Color(0xFF101418))
@@ -236,16 +285,48 @@ fun ExperimentScreen(
                     GraphMode.HIGH_G -> chartData.highG
                     GraphMode.GYRO -> chartData.gyro
                     GraphMode.BOTH_ACC -> chartData.lowG
+                    GraphMode.ALL -> chartData.lowG
                 }
-                
-                val title = if (mode.chartTitle.isNotEmpty()) "${mode.chartTitle} (${mode.yAxisUnit})" else "${selectedMode.label} (${mode.yAxisUnit})"
-                
-                ExperimentChart(
-                    title = title,
-                    points = activeData,
-                    timeWindowSec = timeWindowSec,
-                    modifier = Modifier.fillMaxSize()
-                )
+
+                if (mode.is3dAirplaneMode && !isGraphViewForced) {
+                    Airplane3DView(
+                        pitchDeg = pitchDeg,
+                        rollDeg = rollDeg,
+                        yawDeg = yawDeg - yawOffset,
+                        gForce = gForce,
+                        turnRateDps = turnRateDps,
+                        onZeroHeading = { yawOffset = yawDeg },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    val title = if (mode.chartTitle.isNotEmpty()) "${mode.chartTitle} (${mode.yAxisUnit})" else "${selectedMode.label} (${mode.yAxisUnit})"
+                    ExperimentChart(
+                        title = title,
+                        points = activeData,
+                        timeWindowSec = timeWindowSec,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                // If in 3D airplane mode, show toggle button for 3D vs Plot View
+                if (mode.is3dAirplaneMode) {
+                    Surface(
+                        onClick = { isGraphViewForced = !isGraphViewForced },
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xAA000000),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x55FFFFFF)),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 40.dp, end = 8.dp)
+                    ) {
+                        Text(
+                            text = if (isGraphViewForced) "✈️ 3D View" else "📈 Plot",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
             }
 
             // Scrollable Configurations and Analysis Area Below the Plot
@@ -261,6 +342,7 @@ fun ExperimentScreen(
                     GraphMode.HIGH_G -> chartData.highG
                     GraphMode.GYRO -> chartData.gyro
                     GraphMode.BOTH_ACC -> chartData.lowG
+                    GraphMode.ALL -> chartData.lowG
                 }
 
                 if (mode.showPeakForce || mode.showImpulse || mode.showPeriodDetection || mode.showVelocityIntegration || mode.showFreeFallDetection) {
@@ -498,6 +580,31 @@ fun ExperimentScreen(
                                             }
                                         }
                                     }
+                                    GraphMode.ALL -> {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                CompactOdrDropdown(
+                                                    title = "Low-G",
+                                                    options = lowGOdrOptions,
+                                                    selectedSuffix = lowGOdr,
+                                                    enabled = true,
+                                                    onSelected = { viewModel.setLowGOdr(it) }
+                                                )
+                                            }
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                CompactOdrDropdown(
+                                                    title = "Gyro",
+                                                    options = gyroOdrOptions,
+                                                    selectedSuffix = gyroOdr,
+                                                    enabled = true,
+                                                    onSelected = { viewModel.setGyroOdr(it) }
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(2.dp))
@@ -579,6 +686,31 @@ fun ExperimentScreen(
                                                     selectedSuffix = highGRange,
                                                     enabled = true,
                                                     onSelected = { viewModel.setHighGRange(it) }
+                                                )
+                                            }
+                                        }
+                                    }
+                                    GraphMode.ALL -> {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                CompactRangeDropdown(
+                                                    title = "Low-G",
+                                                    options = lowGRangeOptions,
+                                                    selectedSuffix = lowGRange,
+                                                    enabled = true,
+                                                    onSelected = { viewModel.setLowGRange(it) }
+                                                )
+                                            }
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                CompactRangeDropdown(
+                                                    title = "Gyro",
+                                                    options = gyroRangeOptions,
+                                                    selectedSuffix = gyroRange,
+                                                    enabled = true,
+                                                    onSelected = { viewModel.setGyroRange(it) }
                                                 )
                                             }
                                         }

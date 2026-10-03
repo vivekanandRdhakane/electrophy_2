@@ -32,6 +32,7 @@ data class ExperimentMode(
     val showPeriodDetection: Boolean = false,
     val showVelocityIntegration: Boolean = false,
     val showFreeFallDetection: Boolean = false,
+    val is3dAirplaneMode: Boolean = false,
     val instructions: String = ""
 )
 
@@ -175,6 +176,25 @@ val experimentModes: List<ExperimentMode> = listOf(
         yAxisUnit = "mg",
         showVelocityIntegration = true,
         instructions = "1. Mount the sensor in a vehicle\n2. Tap Resume to start streaming\n3. Accelerate, cruise, and brake\n4. Observe the acceleration profile\n5. Velocity is estimated by integrating acceleration"
+    ),
+    ExperimentMode(
+        id = "airplane_3d",
+        name = "3D Aeroplane Attitude",
+        description = "Interactive 3D airplane model synced with sensor Pitch, Roll & Yaw with HUD.",
+        icon = "✈️",
+        category = "Flight & Aerodynamics",
+        streamMode = GraphMode.ALL,
+        lowGOdr = "120hz",
+        gyroOdr = "120hz",
+        lowGRange = "4g",
+        gyroRange = "2000dps",
+        timeWindowSec = 5f,
+        filterEnabled = true,
+        filterAlpha = 0.25f,
+        chartTitle = "Orientation Telemetry",
+        yAxisUnit = "deg",
+        is3dAirplaneMode = true,
+        instructions = "1. Hold the sensor board horizontally (facing forward like an aircraft fuselage)\n2. Tap 'Zero Heading' to calibrate your forward direction\n3. Tilt up/down for Pitch (Climb & Dive)\n4. Tilt left/right for Roll (Banking)\n5. Turn left/right horizontally for Yaw (Heading)\n6. Watch the 3D aircraft model & artificial horizon HUD react in real time!"
     )
 )
 

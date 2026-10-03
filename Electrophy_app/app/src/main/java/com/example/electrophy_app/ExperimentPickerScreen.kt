@@ -136,6 +136,7 @@ private fun ExperimentModeCard(
                         GraphMode.HIGH_G -> "High-G"
                         GraphMode.BOTH_ACC -> "Both-G"
                         GraphMode.GYRO -> "Gyro"
+                        GraphMode.ALL -> "Accel+Gyro"
                     }
                     SmallConfigChip(streamLabel)
                     
