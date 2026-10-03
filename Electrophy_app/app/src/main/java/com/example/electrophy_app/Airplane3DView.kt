@@ -77,7 +77,7 @@ private data class PolyFace(
 )
 
 enum class CameraViewMode(val label: String) {
-    CHASE("Chase View"),
+    ISOMETRIC("Isometric View"),
     TOP_DOWN("Top View"),
     PILOT("Cockpit HUD")
 }
@@ -92,7 +92,7 @@ fun Airplane3DView(
     onZeroHeading: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var cameraMode by remember { mutableStateOf(CameraViewMode.CHASE) }
+    var cameraMode by remember { mutableStateOf(CameraViewMode.ISOMETRIC) }
 
     Box(
         modifier = modifier
@@ -109,7 +109,7 @@ fun Airplane3DView(
             // 1. Draw Flight HUD / Artificial Horizon in background
             drawArtificialHorizon(pitchDeg, rollDeg, width, height)
 
-            // 2. Draw 3D Airplane Mesh (if in Chase or Top-Down mode)
+            // 2. Draw 3D Airplane Mesh (if in Isometric or Top-Down mode)
             if (cameraMode != CameraViewMode.PILOT) {
                 drawAirplaneMesh(
                     yawDeg = yawDeg,
@@ -121,8 +121,10 @@ fun Airplane3DView(
                 )
             }
 
-            // 3. Draw Cockpit Reticle / Crosshair
-            drawFlightReticle(cx, cy)
+            // 3. Draw Cockpit Reticle in Cockpit HUD mode
+            if (cameraMode == CameraViewMode.PILOT) {
+                drawFlightReticle(cx, cy)
+            }
         }
 
         // Top Controls: Camera View Selector & Zero Heading Button
@@ -419,7 +421,7 @@ private fun DrawScope.drawAirplaneMesh(
     val cameraDist = 420f
     val fov = 900f // Doubled from 450f to double on-screen model scale
 
-    val lightDir = Vec3(0.4f, -0.5f, 0.77f).normalize()
+    val lightDir = Vec3(-0.35f, -0.45f, 0.82f).normalize()
 
     // 4. Transform and Depth-Sort Faces (Painter's Algorithm)
     data class TransformedFace(
@@ -440,12 +442,24 @@ private fun DrawScope.drawAirplaneMesh(
 
             // Apply Camera View Orientation
             when (cameraMode) {
-                CameraViewMode.CHASE -> {
-                    // Look at aircraft from behind (+Y is forward, camera is behind at -Y, slightly elevated in +Z)
-                    // Rotate world so camera looks down -Y axis with an elevation tilt of ~18 degrees
-                    val camElevation = Math.toRadians(18.0).toFloat()
-                    val c = cos(camElevation); val s = sin(camElevation)
-                    Vec3(p.x, p.y * c + p.z * s, -p.y * s + p.z * c)
+                CameraViewMode.ISOMETRIC -> {
+                    // Isometric 3/4 axonometric view (elevation ~26°, azimuth ~32°)
+                    val azRad = Math.toRadians(32.0).toFloat()
+                    val elRad = Math.toRadians(26.0).toFloat()
+                    val cosAz = cos(azRad); val sinAz = sin(azRad)
+                    val cosEl = cos(elRad); val sinEl = sin(elRad)
+
+                    // Step 1: Azimuth rotation around vertical axis (Z)
+                    val x1 = p.x * cosAz + p.y * sinAz
+                    val y1 = -p.x * sinAz + p.y * cosAz
+                    val z1 = p.z
+
+                    // Step 2: Elevation tilt
+                    val xCam = x1
+                    val yCam = y1 * cosEl - z1 * sinEl
+                    val zCam = y1 * sinEl + z1 * cosEl
+
+                    Vec3(xCam, yCam, zCam)
                 }
                 CameraViewMode.TOP_DOWN -> {
                     // Look straight down at the top of the airplane
@@ -462,7 +476,7 @@ private fun DrawScope.drawAirplaneMesh(
         val normal = (v1 - v0).cross(v2 - v0).normalize()
 
         // Directional Lambertian Shading
-        val lightFactor = (0.4f + 0.6f * max(0f, normal.dot(lightDir))).coerceIn(0.2f, 1f)
+        val lightFactor = (0.55f + 0.45f * max(0f, normal.dot(lightDir))).coerceIn(0.35f, 1f)
         val shadedColor = Color(
             red = (face.baseColor.red * lightFactor).coerceIn(0f, 1f),
             green = (face.baseColor.green * lightFactor).coerceIn(0f, 1f),
