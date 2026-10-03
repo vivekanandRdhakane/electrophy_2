@@ -37,6 +37,70 @@ data class ExperimentMode(
 )
 
 val experimentModes: List<ExperimentMode> = listOf(
+    // 1. Flight & Aerodynamics
+    ExperimentMode(
+        id = "airplane_3d",
+        name = "3D Aeroplane Attitude",
+        description = "Interactive 3D airplane model synced with sensor Pitch, Roll & Yaw with HUD.",
+        icon = "✈️",
+        category = "Flight & Aerodynamics",
+        streamMode = GraphMode.ALL,
+        lowGOdr = "120hz",
+        gyroOdr = "120hz",
+        lowGRange = "4g",
+        gyroRange = "2000dps",
+        timeWindowSec = 5f,
+        filterEnabled = true,
+        filterAlpha = 0.25f,
+        chartTitle = "Orientation Telemetry",
+        yAxisUnit = "deg",
+        is3dAirplaneMode = true,
+        instructions = "1. Hold the sensor board horizontally (facing forward like an aircraft fuselage)\n2. Tap 'Zero Heading' to calibrate your forward direction\n3. Tilt up/down for Pitch (Climb & Dive)\n4. Tilt left/right for Roll (Banking)\n5. Turn left/right horizontally for Yaw (Heading)\n6. Watch the 3D aircraft model & artificial horizon HUD react in real time!"
+    ),
+
+    // 2. Kinematics
+    ExperimentMode(
+        id = "pendulum",
+        name = "Simple Pendulum",
+        description = "Measure oscillation period of a pendulum.",
+        icon = "📐",
+        category = "Kinematics",
+        streamMode = GraphMode.LOW_G,
+        lowGOdr = "120hz",
+        lowGRange = "4g",
+        autoTriggerEnabled = false,
+        timeWindowSec = 10f,
+        filterEnabled = true,
+        filterAlpha = 0.5f,
+        chartTitle = "Pendulum Oscillation",
+        yAxisUnit = "mg",
+        showPeriodDetection = true,
+        instructions = "1. Attach the sensor to a pendulum bob\n2. Tap Resume to start streaming\n3. Set the pendulum swinging\n4. Observe the periodic acceleration pattern\n5. The detected period T can verify T=2π√(L/g)"
+    ),
+    ExperimentMode(
+        id = "vehicle_accel",
+        name = "Vehicle Acceleration",
+        description = "Estimate velocity change by integrating acceleration.",
+        icon = "🏎️",
+        category = "Kinematics",
+        streamMode = GraphMode.LOW_G,
+        lowGOdr = "120hz",
+        lowGRange = "8g",
+        autoTriggerEnabled = true,
+        triggerAxis = "Z",
+        triggerCondition = "Deviation",
+        triggerThreshold = 3000f,
+        triggerDelayMs = 500L,
+        timeWindowSec = 30f,
+        filterEnabled = true,
+        filterAlpha = 0.1f,
+        chartTitle = "Vehicle Acceleration",
+        yAxisUnit = "mg",
+        showVelocityIntegration = true,
+        instructions = "1. Mount the sensor in a vehicle\n2. Tap Resume to start streaming\n3. Accelerate, cruise, and brake\n4. Observe the acceleration profile\n5. Velocity is estimated by integrating acceleration"
+    ),
+
+    // 3. Mechanics
     ExperimentMode(
         id = "newtons_third_law",
         name = "Newton's Third Law",
@@ -99,24 +163,6 @@ val experimentModes: List<ExperimentMode> = listOf(
         instructions = "1. Securely attach the sensor to a rotating object or string\n2. Tap Resume to start streaming\n3. Spin the object at a steady rate\n4. Observe the centripetal acceleration pattern\n5. Use the peak values with a=ω²r to verify"
     ),
     ExperimentMode(
-        id = "pendulum",
-        name = "Simple Pendulum",
-        description = "Measure oscillation period of a pendulum.",
-        icon = "📐",
-        category = "Kinematics",
-        streamMode = GraphMode.LOW_G,
-        lowGOdr = "120hz",
-        lowGRange = "4g",
-        autoTriggerEnabled = false,
-        timeWindowSec = 10f,
-        filterEnabled = true,
-        filterAlpha = 0.5f,
-        chartTitle = "Pendulum Oscillation",
-        yAxisUnit = "mg",
-        showPeriodDetection = true,
-        instructions = "1. Attach the sensor to a pendulum bob\n2. Tap Resume to start streaming\n3. Set the pendulum swinging\n4. Observe the periodic acceleration pattern\n5. The detected period T can verify T=2π√(L/g)"
-    ),
-    ExperimentMode(
         id = "impulse_momentum",
         name = "Impulse & Momentum",
         description = "Integrate force over time to find impulse.",
@@ -154,47 +200,6 @@ val experimentModes: List<ExperimentMode> = listOf(
         chartTitle = "Apparent Weight / g-Forces",
         yAxisUnit = "mg",
         instructions = "1. Hold the device in an elevator\n2. Tap Resume to start streaming\n3. Ride the elevator up and down\n4. Observe acceleration changes during start/stop\n5. The Z-axis shows apparent weight variations around 1g"
-    ),
-    ExperimentMode(
-        id = "vehicle_accel",
-        name = "Vehicle Acceleration",
-        description = "Estimate velocity change by integrating acceleration.",
-        icon = "🏎️",
-        category = "Kinematics",
-        streamMode = GraphMode.LOW_G,
-        lowGOdr = "120hz",
-        lowGRange = "8g",
-        autoTriggerEnabled = true,
-        triggerAxis = "Z",
-        triggerCondition = "Deviation",
-        triggerThreshold = 3000f,
-        triggerDelayMs = 500L,
-        timeWindowSec = 30f,
-        filterEnabled = true,
-        filterAlpha = 0.1f,
-        chartTitle = "Vehicle Acceleration",
-        yAxisUnit = "mg",
-        showVelocityIntegration = true,
-        instructions = "1. Mount the sensor in a vehicle\n2. Tap Resume to start streaming\n3. Accelerate, cruise, and brake\n4. Observe the acceleration profile\n5. Velocity is estimated by integrating acceleration"
-    ),
-    ExperimentMode(
-        id = "airplane_3d",
-        name = "3D Aeroplane Attitude",
-        description = "Interactive 3D airplane model synced with sensor Pitch, Roll & Yaw with HUD.",
-        icon = "✈️",
-        category = "Flight & Aerodynamics",
-        streamMode = GraphMode.ALL,
-        lowGOdr = "120hz",
-        gyroOdr = "120hz",
-        lowGRange = "4g",
-        gyroRange = "2000dps",
-        timeWindowSec = 5f,
-        filterEnabled = true,
-        filterAlpha = 0.25f,
-        chartTitle = "Orientation Telemetry",
-        yAxisUnit = "deg",
-        is3dAirplaneMode = true,
-        instructions = "1. Hold the sensor board horizontally (facing forward like an aircraft fuselage)\n2. Tap 'Zero Heading' to calibrate your forward direction\n3. Tilt up/down for Pitch (Climb & Dive)\n4. Tilt left/right for Roll (Banking)\n5. Turn left/right horizontally for Yaw (Heading)\n6. Watch the 3D aircraft model & artificial horizon HUD react in real time!"
     )
 )
 

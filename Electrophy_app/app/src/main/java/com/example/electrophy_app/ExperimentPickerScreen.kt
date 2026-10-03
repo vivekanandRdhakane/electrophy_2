@@ -69,8 +69,15 @@ fun ExperimentPickerScreen(
                 }
             }
 
+            val categoryOrder = listOf("Flight & Aerodynamics", "Kinematics", "Mechanics")
             val groupedModes = experimentModes.groupBy { it.category }
-            groupedModes.forEach { (category, modes) ->
+            val sortedCategories = groupedModes.keys.sortedBy { cat ->
+                val idx = categoryOrder.indexOf(cat)
+                if (idx != -1) idx else categoryOrder.size
+            }
+
+            sortedCategories.forEach { category ->
+                val modes = groupedModes[category] ?: return@forEach
                 item {
                     Text(
                         text = category,
