@@ -120,6 +120,16 @@ data class AirplaneAttitude(
     val turnRateDps: Float = 0f
 )
 
+data class CalibrationOffsets(
+    val accelX: Float = 0f, // in mg
+    val accelY: Float = 0f, // in mg
+    val accelZ: Float = 0f, // in mg (deviation from ideal 1000mg)
+    val gyroX: Float = 0f,  // in mdps
+    val gyroY: Float = 0f,  // in mdps
+    val gyroZ: Float = 0f,  // in mdps
+    val isCalibrated: Boolean = false
+)
+
 data class OdrOption(val label: String, val suffix: String)
 
 data class RangeOption(val label: String, val suffix: String)
@@ -243,6 +253,8 @@ class BleViewModel : ViewModel() {
         samplesInRateWindow = 0
         _receivedSamplesPerSecond.value = 0
         resetFilterState()
+        _isCalibrating.value = false
+        _calibrationProgress.value = 0f
     }
 
     private val _isFilterEnabled = MutableStateFlow(false)
@@ -556,6 +568,151 @@ class BleViewModel : ViewModel() {
         _attitude.update { it.copy(yawDeg = 0f) }
     }
 
+    private val _calibrationOffsets = MutableStateFlow(CalibrationOffsets())
+    val calibrationOffsets: StateFlow<CalibrationOffsets> = _calibrationOffsets
+
+    private val _isCalibrating = MutableStateFlow(false)
+    val isCalibrating: StateFlow<Boolean> = _isCalibrating
+
+    private val _calibrationProgress = MutableStateFlow(0f)
+    val calibrationProgress: StateFlow<Float> = _calibrationProgress
+
+    private val _calibrationDurationSec = MutableStateFlow(2f)
+    val calibrationDurationSec: StateFlow<Float> = _calibrationDurationSec
+
+    fun setCalibrationDurationSec(sec: Float) {
+        _calibrationDurationSec.value = sec
+    }
+
+    private var calibrationStartTimeMs = 0L
+    private var calibAccXSum = 0.0
+    private var calibAccYSum = 0.0
+    private var calibAccZSum = 0.0
+    private var calibAccCount = 0
+
+    private var calibGyroXSum = 0.0
+    private var calibGyroYSum = 0.0
+    private var calibGyroZSum = 0.0
+    private var calibGyroCount = 0
+
+    fun startCalibration() {
+        if (_connectionState.value != ConnectionState.Connected) return
+        if (_isPaused.value) {
+            togglePause()
+        }
+        calibAccXSum = 0.0
+        calibAccYSum = 0.0
+        calibAccZSum = 0.0
+        calibAccCount = 0
+
+        calibGyroXSum = 0.0
+        calibGyroYSum = 0.0
+        calibGyroZSum = 0.0
+        calibGyroCount = 0
+
+        calibrationStartTimeMs = System.currentTimeMillis()
+        _calibrationProgress.value = 0f
+        _isCalibrating.value = true
+    }
+
+    fun resetCalibration() {
+        _isCalibrating.value = false
+        _calibrationProgress.value = 0f
+        val cleared = CalibrationOffsets()
+        _calibrationOffsets.value = cleared
+        saveCalibrationToPrefs(cleared)
+        resetAttitudeYaw()
+    }
+
+    private fun collectCalibrationBatch(lowGList: List<AxisPoint>, gyroList: List<AxisPoint>) {
+        if (!_isCalibrating.value) return
+
+        for (p in lowGList) {
+            calibAccXSum += p.x
+            calibAccYSum += p.y
+            calibAccZSum += p.z
+            calibAccCount++
+        }
+
+        for (p in gyroList) {
+            calibGyroXSum += p.x
+            calibGyroYSum += p.y
+            calibGyroZSum += p.z
+            calibGyroCount++
+        }
+
+        val elapsedMs = System.currentTimeMillis() - calibrationStartTimeMs
+        val durationMs = (_calibrationDurationSec.value * 1000f).toLong().coerceAtLeast(500L)
+        val progress = (elapsedMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+        _calibrationProgress.value = progress
+
+        if (elapsedMs >= durationMs) {
+            val prevOffsets = _calibrationOffsets.value
+            val offX = if (calibAccCount > 0) (calibAccXSum / calibAccCount).toFloat() else prevOffsets.accelX
+            val offY = if (calibAccCount > 0) (calibAccYSum / calibAccCount).toFloat() else prevOffsets.accelY
+            // Sensor resting flat with Z pointing up, expected gravity is +1000mg.
+            val offZ = if (calibAccCount > 0) ((calibAccZSum / calibAccCount) - 1000.0).toFloat() else prevOffsets.accelZ
+
+            val offGx = if (calibGyroCount > 0) (calibGyroXSum / calibGyroCount).toFloat() else prevOffsets.gyroX
+            val offGy = if (calibGyroCount > 0) (calibGyroYSum / calibGyroCount).toFloat() else prevOffsets.gyroY
+            val offGz = if (calibGyroCount > 0) (calibGyroZSum / calibGyroCount).toFloat() else prevOffsets.gyroZ
+
+            val newOffsets = CalibrationOffsets(
+                accelX = offX,
+                accelY = offY,
+                accelZ = offZ,
+                gyroX = offGx,
+                gyroY = offGy,
+                gyroZ = offGz,
+                isCalibrated = (calibAccCount > 0 || calibGyroCount > 0)
+            )
+            _calibrationOffsets.value = newOffsets
+            saveCalibrationToPrefs(newOffsets)
+            _isCalibrating.value = false
+            _calibrationProgress.value = 1f
+
+            attitudeYaw = 0f
+            attitudePitch = 0f
+            attitudeRoll = 0f
+            _attitude.value = AirplaneAttitude(
+                pitchDeg = 0f,
+                rollDeg = 0f,
+                yawDeg = 0f,
+                gForce = 1f,
+                turnRateDps = 0f
+            )
+        }
+    }
+
+    private fun saveCalibrationToPrefs(offsets: CalibrationOffsets) {
+        val prefs = context?.getSharedPreferences("sensor_calibration", Context.MODE_PRIVATE) ?: return
+        prefs.edit().apply {
+            putFloat("accel_x", offsets.accelX)
+            putFloat("accel_y", offsets.accelY)
+            putFloat("accel_z", offsets.accelZ)
+            putFloat("gyro_x", offsets.gyroX)
+            putFloat("gyro_y", offsets.gyroY)
+            putFloat("gyro_z", offsets.gyroZ)
+            putBoolean("is_calibrated", offsets.isCalibrated)
+            apply()
+        }
+    }
+
+    private fun loadCalibrationFromPrefs(): CalibrationOffsets {
+        val prefs = context?.getSharedPreferences("sensor_calibration", Context.MODE_PRIVATE) ?: return CalibrationOffsets()
+        val isCal = prefs.getBoolean("is_calibrated", false)
+        if (!isCal) return CalibrationOffsets()
+        return CalibrationOffsets(
+            accelX = prefs.getFloat("accel_x", 0f),
+            accelY = prefs.getFloat("accel_y", 0f),
+            accelZ = prefs.getFloat("accel_z", 0f),
+            gyroX = prefs.getFloat("gyro_x", 0f),
+            gyroY = prefs.getFloat("gyro_y", 0f),
+            gyroZ = prefs.getFloat("gyro_z", 0f),
+            isCalibrated = true
+        )
+    }
+
     private val xyzRegex = Regex(
         """X\s*=\s*(-?\d+(?:\.\d+)?)\s+Y\s*=\s*(-?\d+(?:\.\d+)?)\s+Z\s*=\s*(-?\d+(?:\.\d+)?)"""
     )
@@ -814,9 +971,17 @@ class BleViewModel : ViewModel() {
         val now = System.currentTimeMillis()
         if (now - lastTerminalUpdateTimeMs >= 100L) {
             lastTerminalUpdateTimeMs = now
+            val offsets = _calibrationOffsets.value
+            val dispLowG = if (offsets.isCalibrated && filteredLowG.isNotEmpty()) {
+                filteredLowG.map { AxisPoint(it.x - offsets.accelX, it.y - offsets.accelY, it.z - offsets.accelZ, it.time) }
+            } else filteredLowG
+            val dispGyro = if (offsets.isCalibrated && filteredGyro.isNotEmpty()) {
+                filteredGyro.map { AxisPoint(it.x - offsets.gyroX, it.y - offsets.gyroY, it.z - offsets.gyroZ, it.time) }
+            } else filteredGyro
+
             val terminalLine = when (mode) {
                 1 -> {
-                    val pt = filteredLowG.lastOrNull()
+                    val pt = dispLowG.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f", pt.x, pt.y, pt.z) else null
                 }
                 2 -> {
@@ -824,20 +989,20 @@ class BleViewModel : ViewModel() {
                     if (pt != null) String.format(Locale.US, "[High-G g] X=%6.2f Y=%6.2f Z=%6.2f", pt.x, pt.y, pt.z) else null
                 }
                 3 -> {
-                    val lg = filteredLowG.lastOrNull()
+                    val lg = dispLowG.lastOrNull()
                     val hg = filteredHighG.lastOrNull()
                     if (lg != null && hg != null) {
                         String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f", lg.x, lg.y, lg.z, hg.x, hg.y, hg.z)
                     } else null
                 }
                 4 -> {
-                    val pt = filteredGyro.lastOrNull()
+                    val pt = dispGyro.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[mdps] X=%8.2f Y=%8.2f Z=%8.2f", pt.x, pt.y, pt.z) else null
                 }
                 0 -> {
-                    val lg = filteredLowG.lastOrNull()
+                    val lg = dispLowG.lastOrNull()
                     val hg = filteredHighG.lastOrNull()
-                    val gy = filteredGyro.lastOrNull()
+                    val gy = dispGyro.lastOrNull()
                     if (lg != null && hg != null && gy != null) {
                         String.format(Locale.US, "[LG mg] X=%7.2f Y=%7.2f Z=%7.2f  [HG g] X=%6.2f Y=%6.2f Z=%6.2f  [mdps] X=%8.2f Y=%8.2f Z=%8.2f",
                             lg.x, lg.y, lg.z, hg.x, hg.y, hg.z, gy.x, gy.y, gy.z)
@@ -883,13 +1048,42 @@ class BleViewModel : ViewModel() {
     ) {
         if (newLowG.isEmpty() && newHighG.isEmpty() && newGyro.isEmpty()) return
 
-        updateAttitudeFromBatch(newLowG, newGyro)
+        collectCalibrationBatch(newLowG, newGyro)
+
+        val offsets = _calibrationOffsets.value
+        val effLowG = if (offsets.isCalibrated && newLowG.isNotEmpty()) {
+            newLowG.map { pt ->
+                AxisPoint(
+                    x = pt.x - offsets.accelX,
+                    y = pt.y - offsets.accelY,
+                    z = pt.z - offsets.accelZ,
+                    time = pt.time
+                )
+            }
+        } else {
+            newLowG
+        }
+
+        val effGyro = if (offsets.isCalibrated && newGyro.isNotEmpty()) {
+            newGyro.map { pt ->
+                AxisPoint(
+                    x = pt.x - offsets.gyroX,
+                    y = pt.y - offsets.gyroY,
+                    z = pt.z - offsets.gyroZ,
+                    time = pt.time
+                )
+            }
+        } else {
+            newGyro
+        }
+
+        updateAttitudeFromBatch(effLowG, effGyro)
 
         _chartData.update { current ->
             current.copy(
-                lowG = if (newLowG.isNotEmpty()) (current.lowG + newLowG).takeLast(MAX_CHART_POINTS) else current.lowG,
+                lowG = if (effLowG.isNotEmpty()) (current.lowG + effLowG).takeLast(MAX_CHART_POINTS) else current.lowG,
                 highG = if (newHighG.isNotEmpty()) (current.highG + newHighG).takeLast(MAX_CHART_POINTS) else current.highG,
-                gyro = if (newGyro.isNotEmpty()) (current.gyro + newGyro).takeLast(MAX_CHART_POINTS) else current.gyro,
+                gyro = if (effGyro.isNotEmpty()) (current.gyro + effGyro).takeLast(MAX_CHART_POINTS) else current.gyro,
             )
         }
     }
@@ -969,6 +1163,7 @@ class BleViewModel : ViewModel() {
 
     fun init(ctx: Context) {
         this.context = ctx.applicationContext
+        _calibrationOffsets.value = loadCalibrationFromPrefs()
     }
 
     fun startScan() {
@@ -1118,20 +1313,50 @@ class BleViewModel : ViewModel() {
         }.toList()
 
     private fun appendPoints(lowG: AxisPoint? = null, highG: AxisPoint? = null, gyro: AxisPoint? = null) {
+        if (lowG != null || gyro != null) {
+            collectCalibrationBatch(
+                lowGList = if (lowG != null) listOf(lowG) else emptyList(),
+                gyroList = if (gyro != null) listOf(gyro) else emptyList()
+            )
+        }
+
+        val offsets = _calibrationOffsets.value
+        val effLowG = if (offsets.isCalibrated && lowG != null) {
+            AxisPoint(
+                x = lowG.x - offsets.accelX,
+                y = lowG.y - offsets.accelY,
+                z = lowG.z - offsets.accelZ,
+                time = lowG.time
+            )
+        } else {
+            lowG
+        }
+
+        val effGyro = if (offsets.isCalibrated && gyro != null) {
+            AxisPoint(
+                x = gyro.x - offsets.gyroX,
+                y = gyro.y - offsets.gyroY,
+                z = gyro.z - offsets.gyroZ,
+                time = gyro.time
+            )
+        } else {
+            gyro
+        }
+
         val rawTimeMs = System.currentTimeMillis() - sessionStartTimeMs
         val timeMs = if (rawTimeMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawTimeMs
         lastAssignedTimeMs = timeMs
         val timeFloat = timeMs.toFloat()
 
-        if (lowG != null || gyro != null) {
-            updateAttitudeSingle(lowG, gyro)
+        if (effLowG != null || effGyro != null) {
+            updateAttitudeSingle(effLowG, effGyro)
         }
 
         _chartData.update { current ->
             current.copy(
-                lowG = if (lowG != null) (current.lowG + lowG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.lowG,
+                lowG = if (effLowG != null) (current.lowG + effLowG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.lowG,
                 highG = if (highG != null) (current.highG + highG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.highG,
-                gyro = if (gyro != null) (current.gyro + gyro.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.gyro,
+                gyro = if (effGyro != null) (current.gyro + effGyro.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.gyro,
             )
         }
     }
@@ -1595,6 +1820,9 @@ fun BleAppScreen(
                     )
                 }
             }
+
+            // Sensor Calibration Section (Zero-Drift)
+            SensorCalibrationCard(viewModel = viewModel)
 
             // Sensor Sampling Rate and Range Section (Collapsible)
             Card(
@@ -2833,4 +3061,176 @@ fun InfoAlertDialog(
         }
     )
 }
+
+@Composable
+fun SensorCalibrationCard(
+    viewModel: BleViewModel,
+    modifier: Modifier = Modifier
+) {
+    val isCalibrating by viewModel.isCalibrating.collectAsState()
+    val progress by viewModel.calibrationProgress.collectAsState()
+    val offsets by viewModel.calibrationOffsets.collectAsState()
+    val durationSec by viewModel.calibrationDurationSec.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    var showInfoDialog by remember { mutableStateOf(false) }
+
+    if (showInfoDialog) {
+        InfoAlertDialog(
+            title = "Sensor Calibration (Zero-Drift)",
+            infoText = "  Zero-drift calibration eliminates steady-state gyroscope yaw spin and accelerometer tilt errors.\n\n" +
+                    "• How to Calibrate:\n" +
+                    "  1. Place your device/sensor stationary on a flat, level table with the Z-axis pointing straight up.\n" +
+                    "  2. Select your desired calibration time window using the slider (default is 2.0s).\n" +
+                    "  3. Tap 'Calibrate'. Keep the board completely still during calibration.\n\n" +
+                    "• How it Works:\n" +
+                    "  - Gyroscope: Samples zero-rate bias and cancels residual angular velocity so yaw heading remains locked with zero drift.\n" +
+                    "  - Accelerometer: Calibrates X & Y to 0 mg and Z to +1000 mg (1-G earth gravity reference) for perfect level attitude (0° pitch & roll).\n\n" +
+                    "• Persistence:\n" +
+                    "  Calibration offsets are saved automatically and restored whenever the app opens.",
+            onDismiss = { showInfoDialog = false }
+        )
+    }
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 1.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Sensor Calibration (Zero-Drift)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (offsets.isCalibrated) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF2E7D32).copy(alpha = 0.2f),
+                            contentColor = Color(0xFF2E7D32)
+                        ) {
+                            Text(
+                                text = "CALIBRATED",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+                InfoIconButton(onClick = { showInfoDialog = true })
+            }
+
+            // Calibration Window Slider
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Window: ${String.format(Locale.US, "%.1fs", durationSec)}",
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (offsets.isCalibrated) {
+                    Text(
+                        text = "Off: [A: %.0f,%.0f,%.0f mg | G: %.0f,%.0f,%.0f mdps]".format(
+                            Locale.US,
+                            offsets.accelX, offsets.accelY, offsets.accelZ,
+                            offsets.gyroX, offsets.gyroY, offsets.gyroZ
+                        ),
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    )
+                }
+            }
+
+            Slider(
+                value = durationSec,
+                onValueChange = { viewModel.setCalibrationDurationSec(it) },
+                valueRange = 1f..5f,
+                steps = 7,
+                enabled = !isCalibrating,
+                modifier = Modifier.height(28.dp)
+            )
+
+            // Progress bar when calibrating
+            if (isCalibrating) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    LinearProgressIndicator(
+                        progress = progress,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                    )
+                    Text(
+                        text = "Calibrating... Keep sensor flat and steady! (${(progress * 100).toInt()}%)",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Action Buttons: Calibrate and Reset
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = { viewModel.startCalibration() },
+                    enabled = !isCalibrating && connectionState == ConnectionState.Connected,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (offsets.isCalibrated) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        text = if (isCalibrating) "Calibrating..." else if (offsets.isCalibrated) "Re-Calibrate" else "Calibrate (Z-Up Flat)",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+
+                if (offsets.isCalibrated) {
+                    OutlinedButton(
+                        onClick = { viewModel.resetCalibration() },
+                        enabled = !isCalibrating,
+                        modifier = Modifier.height(30.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "Reset",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 

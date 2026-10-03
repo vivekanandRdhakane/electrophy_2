@@ -401,6 +401,9 @@ fun ExperimentScreen(
                     }
                 }
 
+                // Sensor Calibration Section (Zero-Drift)
+                SensorCalibrationCard(viewModel = viewModel)
+
                 // Sensor Sampling Rate and Range Section (Collapsible)
                 Card(
                     modifier = Modifier
