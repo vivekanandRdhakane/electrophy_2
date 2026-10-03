@@ -25,12 +25,17 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.components.YAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.github.mikephil.charting.formatter.ValueFormatter
 import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import java.util.Locale
 import kotlin.math.*
 
@@ -1100,6 +1105,10 @@ private fun ExperimentChart(
     var showY by remember { mutableStateOf(true) }
     var showZ by remember { mutableStateOf(true) }
 
+    var cursor1 by remember(isPaused) { mutableStateOf<Entry?>(null) }
+    var cursor2 by remember(isPaused) { mutableStateOf<Entry?>(null) }
+    val chartRef = remember { mutableStateOf<LineChart?>(null) }
+
     var viewEndTimeMs by remember { mutableStateOf<Float?>(null) }
     var prevTimeWindowSec by remember { mutableStateOf(timeWindowSec) }
 
@@ -1135,6 +1144,16 @@ private fun ExperimentChart(
         (endT - windowMs).coerceAtLeast(0f)
     }
 
+    LaunchedEffect(points, isPaused, timeWindowSec) {
+        if (!isPaused && cursor1 != null) {
+            val minTimeThreshold = maxTime - windowMs
+            if (cursor1!!.x < minTimeThreshold) {
+                cursor1 = null
+                cursor2 = null
+            }
+        }
+    }
+
     Column(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -1159,6 +1178,57 @@ private fun ExperimentChart(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .pointerInput(points, isPaused, timeWindowSec) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            val chart = chartRef.value
+
+                            if (chart != null) {
+                                if (isPaused) {
+                                    val newlyPressed = event.changes.filter { it.pressed && !it.previousPressed }
+                                    if (pressed.size >= 2) {
+                                        val p1 = pressed[0].position
+                                        val p2 = pressed[1].position
+                                        val h1 = chart.getHighlightByTouchPoint(p1.x, p1.y)
+                                        val h2 = chart.getHighlightByTouchPoint(p2.x, p2.y)
+                                        if (h1 != null && h2 != null) {
+                                            cursor1 = Entry(h1.x, h1.y)
+                                            cursor2 = Entry(h2.x, h2.y)
+                                        }
+                                        event.changes.forEach { it.consume() }
+                                    } else if (newlyPressed.size == 1) {
+                                        val pos = newlyPressed[0].position
+                                        val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                        if (h != null) {
+                                            cursor1 = Entry(h.x, h.y)
+                                            cursor2 = null
+                                        }
+                                        newlyPressed[0].consume()
+                                    } else if (pressed.size == 1 && cursor2 == null) {
+                                        val pos = pressed[0].position
+                                        val h = chart.getHighlightByTouchPoint(pos.x, pos.y)
+                                        if (h != null) {
+                                            cursor1 = Entry(h.x, h.y)
+                                        }
+                                        pressed[0].consume()
+                                    }
+                                } else {
+                                    if (pressed.size == 1) {
+                                        val pos = pressed[0].position
+                                        val offsetX = -70f
+                                        val offsetY = -120f
+                                        val valD = chart.getValuesByTouchPoint(pos.x + offsetX, pos.y + offsetY, YAxis.AxisDependency.LEFT)
+                                        cursor1 = Entry(valD.x.toFloat(), valD.y.toFloat())
+                                        cursor2 = null
+                                        pressed[0].consume()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
         ) {
             AndroidView(
                 factory = { ctx ->
@@ -1197,10 +1267,13 @@ private fun ExperimentChart(
                         }
                         axisRight.isEnabled = false
                         legend.isEnabled = false
+
+                        chartRef.value = this
                     }
                 },
-                modifier = Modifier.fillMaxSize().padding(bottom = 4.dp),
+                modifier = Modifier.fillMaxSize(),
                 update = { chart ->
+                    chartRef.value = chart
                     chart.xAxis.valueFormatter = object : ValueFormatter() {
                         override fun getFormattedValue(value: Float): String {
                             val sec = value / 1000f
@@ -1248,11 +1321,129 @@ private fun ExperimentChart(
                     }
 
                     chart.data = LineData(dataSets.map { it as ILineDataSet })
+                    chart.highlightValue(null)
                     chart.notifyDataSetChanged()
                     chart.invalidate()
                 }
             )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val chart = chartRef.value
+                if (chart != null) {
+                    if (cursor1 != null && cursor1!!.x in startT..endT) {
+                        val pixelD = chart.getPixelForValues(cursor1!!.x, cursor1!!.y, YAxis.AxisDependency.LEFT)
+                        val px = pixelD.x.toFloat()
+                        val py = pixelD.y.toFloat()
+
+                        drawLine(
+                            color = Color(0xFF00E5FF),
+                            start = Offset(px, 0f),
+                            end = Offset(px, size.height),
+                            strokeWidth = 1.5f
+                        )
+                        drawLine(
+                            color = Color(0xFF00E5FF),
+                            start = Offset(0f, py),
+                            end = Offset(size.width, py),
+                            strokeWidth = 1.5f
+                        )
+                        drawCircle(
+                            color = Color(0xFF00E5FF),
+                            radius = 5f,
+                            center = Offset(px, py)
+                        )
+                    }
+
+                    if (cursor2 != null && cursor2!!.x in startT..endT) {
+                        val pixelD2 = chart.getPixelForValues(cursor2!!.x, cursor2!!.y, YAxis.AxisDependency.LEFT)
+                        val px2 = pixelD2.x.toFloat()
+                        val py2 = pixelD2.y.toFloat()
+
+                        drawLine(
+                            color = Color(0xFFFFAB40),
+                            start = Offset(px2, 0f),
+                            end = Offset(px2, size.height),
+                            strokeWidth = 1.5f
+                        )
+                        drawLine(
+                            color = Color(0xFFFFAB40),
+                            start = Offset(0f, py2),
+                            end = Offset(size.width, py2),
+                            strokeWidth = 1.5f
+                        )
+                        drawCircle(
+                            color = Color(0xFFFFAB40),
+                            radius = 5f,
+                            center = Offset(px2, py2)
+                        )
+                    }
+                }
+            }
         }
+
+        // Cursor details in the space below X axis
+        val detailsContent = remember(cursor1, cursor2, isPaused, timeWindowSec) {
+            buildAnnotatedString {
+                if (!isPaused) {
+                    if (cursor1 != null) {
+                        withStyle(SpanStyle(color = Color.LightGray)) { append("Cursor: ") }
+                        val sec = cursor1!!.x / 1000f
+                        val tStr = when {
+                            timeWindowSec < 0.1f -> String.format(Locale.US, "t = %.3fs", sec)
+                            timeWindowSec < 1f -> String.format(Locale.US, "t = %.2fs", sec)
+                            else -> String.format(Locale.US, "t = %.2fs", sec)
+                        }
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append(tStr) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(String.format(Locale.US, "Y = %.2f", cursor1!!.y)) }
+                    } else {
+                        withStyle(SpanStyle(color = Color.Gray)) { append("Tap plot to inspect point (Y Cursor active)") }
+                    }
+                } else {
+                    if (cursor1 != null && cursor2 == null) {
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
+                        val sec = cursor1!!.x / 1000f
+                        val tStr = if (timeWindowSec < 0.1f) String.format(Locale.US, "t = %.3fs, v = %.2f", sec, cursor1!!.y) else String.format(Locale.US, "t = %.2fs, v = %.2f", sec, cursor1!!.y)
+                        withStyle(SpanStyle(color = Color.White)) { append(tStr) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" (Tap/Touch for C2)") }
+                    } else if (cursor1 != null && cursor2 != null) {
+                        val dt = (cursor2!!.x - cursor1!!.x) / 1000f
+                        val dv = cursor2!!.y - cursor1!!.y
+                        val slope = if (dt != 0f) dv / dt else 0f
+
+                        withStyle(SpanStyle(color = Color(0xFF00E5FF))) { append("C1: ") }
+                        val t1Str = if (timeWindowSec < 0.1f) String.format(Locale.US, "t=%.3fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y) else String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor1!!.x / 1000f, cursor1!!.y)
+                        append(t1Str)
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        withStyle(SpanStyle(color = Color(0xFFFFAB40))) { append("C2: ") }
+                        val t2Str = if (timeWindowSec < 0.1f) String.format(Locale.US, "t=%.3fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y) else String.format(Locale.US, "t=%.2fs (v=%.2f)", cursor2!!.x / 1000f, cursor2!!.y)
+                        append(t2Str)
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        val dtStr = if (kotlin.math.abs(dt) < 0.1f) {
+                            String.format(Locale.US, "Δt=%.1fms, Δv=%.2f", dt * 1000f, dv)
+                        } else {
+                            String.format(Locale.US, "Δt=%.2fs, Δv=%.2f", dt, dv)
+                        }
+                        withStyle(SpanStyle(color = Color(0xFF69F0AE))) { append(dtStr) }
+                        withStyle(SpanStyle(color = Color.Gray)) { append(" | ") }
+
+                        withStyle(SpanStyle(color = Color(0xFFFF4081))) { append(String.format(Locale.US, "Slope=%.2f/s", slope)) }
+                    } else {
+                        withStyle(SpanStyle(color = Color.Gray)) { append("Paused: Tap/Drag for C1 (or 2-finger touch for C1 & C2)") }
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = detailsContent,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 2.dp)
+        )
 
         if (isPaused) {
             val canSlide = totalSpan > windowMs
