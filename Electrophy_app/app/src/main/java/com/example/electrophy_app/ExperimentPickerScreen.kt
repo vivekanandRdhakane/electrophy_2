@@ -69,7 +69,7 @@ fun ExperimentPickerScreen(
                 }
             }
 
-            val categoryOrder = listOf("Flight & Aerodynamics", "Kinematics", "Mechanics")
+            val categoryOrder = listOf("Flight & Aerodynamics", "Kinematics", "Mechanics", "Mathematics")
             val groupedModes = experimentModes.groupBy { it.category }
             val sortedCategories = groupedModes.keys.sortedBy { cat ->
                 val idx = categoryOrder.indexOf(cat)
@@ -159,6 +159,10 @@ private fun ExperimentModeCard(
                     
                     if (mode.autoTriggerEnabled) {
                         SmallConfigChip("Auto-Trigger")
+                    }
+
+                    if (mode.isMathMode) {
+                        SmallConfigChip("Selectable Axis")
                     }
                 }
             }

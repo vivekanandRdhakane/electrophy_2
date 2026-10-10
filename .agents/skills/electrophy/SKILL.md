@@ -61,9 +61,11 @@ electrophy_2/
 ├── Electrophy_app/                      ← Android app (Gradle/Kotlin)
 │   └── app/src/main/java/com/example/electrophy_app/
 │       ├── MainActivity.kt              ← BleViewModel, BitReader, SensorChart, navigation
-│       ├── ExperimentScreen.kt          ← Guided experiment UI + physics analysis
-│       ├── ExperimentModes.kt           ← 8 experiment preset definitions
+│       ├── ExperimentScreen.kt          ← Guided experiment UI + physics & math analysis
+│       ├── ExperimentModes.kt           ← 16 experiment preset definitions (8 Physics + 8 Math)
 │       ├── ExperimentPickerScreen.kt    ← Categorized experiment card catalog
+│       ├── MathEngine.kt                ← Signal processing engine (Integration, Derivative, FFT, STFT, Stats, Autocorr, Filters, Comparator)
+│       ├── MathVisualization.kt         ← Interactive math charts, Spectrogram, Histogram, and Lissajous views
 │       └── Airplane3DView.kt           ← Software 3D engine + avionics HUD
 ├── esp_sensor/                          ← ESP-IDF firmware project
 │   ├── main/
@@ -290,8 +292,9 @@ UTF-8 ASCII strings written to the RX characteristic:
 
 #### `BleViewModel` (in `MainActivity.kt`)
 Central ViewModel managing:
-- `ConnectionState` flow (Disconnected → Scanning → Connecting → Connected → Ready)
+- `ConnectionState` flow (Disconnected → Scanning → Connecting → Connected)
 - BLE GATT lifecycle, PHY negotiation, MTU negotiation
+- Serialized BLE GATT command write queue (`commandQueue`, `processNextCommand()`, `onDescriptorWrite`, `onCharacteristicWrite`) and `syncFullConfigurationToDevice()` so multi-command experiment presets (ranges, ODRs, stream mode) are never dropped by Android's single-in-flight GATT constraint
 - Binary packet unpacking via `BitReader`
 - Sensor calibration offsets (`CalibrationOffsets`, persisted in SharedPreferences)
 - Real-time EMA filtering with configurable α
@@ -360,6 +363,16 @@ Real-time physics analysis functions:
 | 6 | Centripetal Acceleration| Mechanics             | LOW_G    | 480 Hz  | ±16g       | Peak force (a = ω²r)       |
 | 7 | Impulse & Momentum      | Mechanics             | HIGH_G   | 3840 Hz | ±256g      | Peak force + Impulse        |
 | 8 | Elevator Physics        | Mechanics             | LOW_G    | 60 Hz   | ±4g        | Apparent weight variation   |
+| 9 | Numerical Integration   | Mathematics           | LOW_G*   | 120 Hz  | ±4g        | 1st & 2nd order ∫x dt, DC drift toggle |
+| 10| Numerical Derivative    | Mathematics           | LOW_G*   | 240 Hz  | ±8g        | Jerk (dx/dt) & Snap (d²x/dt²), stencil smoothing |
+| 11| FFT Frequency Spectrum  | Mathematics           | LOW_G*   | 480 Hz  | ±4g        | Radix-2 FFT, windowing, parabolic peak interpolation |
+| 12| Spectrogram (STFT)      | Mathematics           | LOW_G*   | 480 Hz  | ±4g        | 2D Time-Frequency waterfall heatmap |
+| 13| Statistics & Distribution| Mathematics          | LOW_G*   | 240 Hz  | ±4g        | Histogram + Gaussian fit, μ, σ, skewness, kurtosis |
+| 14| Autocorrelation         | Mathematics           | LOW_G*   | 240 Hz  | ±4g        | R(τ) vs lag, automatic fundamental period T |
+| 15| Digital Filter Lab      | Mathematics           | LOW_G*   | 240 Hz  | ±4g        | LP, HP, BP, Moving Avg, Median + noise residual |
+| 16| Signal Comparator       | Mathematics           | LOW_G*   | 120 Hz  | ±4g, ±2000dps | Dual-axis Pearson r, phase lag, XY Lissajous |
+
+*\*All Mathematics modes allow runtime switching across any single axis (`aX`, `aY`, `aZ`, `|a|`, `hgX`, `hgY`, `hgZ`, `|hg|`, `gX`, `gY`, `gZ`, `|g|`) and automatically switch the BLE sensor stream mode and ODR as needed.*
 
 ### 6.7 3D Visualization (in `Airplane3DView.kt`)
 
@@ -401,8 +414,7 @@ FileProvider configured for CSV log file sharing.
 ### 7.2 Adding a New BLE Command
 
 1. Add the command string parsing in `imu_chr_access_cb()` in `main.c`.
-2. Add the corresponding write call in `BleViewModel` in `MainActivity.kt`.
-3. Use the existing pattern: `writeCharacteristic(rxCharacteristic, "command\r\n".toByteArray())`.
+2. Add the corresponding call in `BleViewModel` in `MainActivity.kt` using `sendCommand("command")` (which automatically serializes writes through `commandQueue`).
 
 ### 7.3 Changing Packet Format
 

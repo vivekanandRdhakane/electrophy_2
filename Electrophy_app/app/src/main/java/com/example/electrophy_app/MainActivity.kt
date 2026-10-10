@@ -512,7 +512,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setLowGRange(suffix: String) {
-        if (_lowGRange.value == suffix) return
         _lowGRange.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("range_low_g_$suffix")
@@ -520,7 +519,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setHighGRange(suffix: String) {
-        if (_highGRange.value == suffix) return
         _highGRange.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("range_high_g_$suffix")
@@ -528,7 +526,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setGyroRange(suffix: String) {
-        if (_gyroRange.value == suffix) return
         _gyroRange.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("range_gyro_$suffix")
@@ -536,7 +533,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setLowGOdr(suffix: String) {
-        if (_lowGOdr.value == suffix) return
         _lowGOdr.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("odr_low_g_$suffix")
@@ -544,7 +540,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setHighGOdr(suffix: String) {
-        if (_highGOdr.value == suffix) return
         _highGOdr.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("odr_high_g_$suffix")
@@ -552,7 +547,6 @@ class BleViewModel : ViewModel() {
     }
 
     fun setGyroOdr(suffix: String) {
-        if (_gyroOdr.value == suffix) return
         _gyroOdr.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("odr_gyro_$suffix")
@@ -729,6 +723,17 @@ class BleViewModel : ViewModel() {
     private var scanner: BluetoothLeScanner? = null
     private var context: Context? = null
 
+    private val commandQueue = ArrayDeque<String>()
+    private var isGattBusy = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val gattWriteTimeoutRunnable = Runnable {
+        if (isGattBusy) {
+            Log.w(BLE_TAG, "GATT write timeout — advancing command queue")
+            isGattBusy = false
+            processNextCommand()
+        }
+    }
+
     private var logFile: File? = null
     private var pendingData = ""
 
@@ -748,6 +753,11 @@ class BleViewModel : ViewModel() {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 _connectionState.value = ConnectionState.Connecting
                 bluetoothGatt = gatt
+                mainHandler.post {
+                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                    commandQueue.clear()
+                    isGattBusy = false
+                }
                 // Request the link settings needed for high-rate binary IMU streaming.
                 // Android or the peripheral can negotiate lower values when unsupported.
                 requestFastLinkParams()
@@ -760,8 +770,14 @@ class BleViewModel : ViewModel() {
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _connectionState.value = ConnectionState.Disconnected
                 _isPaused.value = false
+                mainHandler.post {
+                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                    commandQueue.clear()
+                    isGattBusy = false
+                }
                 bluetoothGatt?.close()
                 bluetoothGatt = null
+                rxCharacteristic = null
             }
         }
 
@@ -790,29 +806,53 @@ class BleViewModel : ViewModel() {
                     rxCharacteristic = service.getCharacteristic(RX_CHAR_UUID)
                     val txChar = service.getCharacteristic(TX_CHAR_UUID)
 
+                    var descriptorWriteStarted = false
                     if (txChar != null) {
                         gatt.setCharacteristicNotification(txChar, true)
                         val descriptor = txChar.getDescriptor(CCCD_UUID)
                         if (descriptor != null) {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                            isGattBusy = true
+                            descriptorWriteStarted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
                             } else {
                                 descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                                 gatt.writeDescriptor(descriptor)
+                            }
+                            if (descriptorWriteStarted) {
+                                mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                                mainHandler.postDelayed(gattWriteTimeoutRunnable, 350L)
+                            } else {
+                                isGattBusy = false
                             }
                         }
                     }
                     _connectionState.value = ConnectionState.Connected
                     resetSession()
-                    // The initial mode command can race the CCCD (notification
-                    // enable) write on some phones, so send it now and once more
-                    // shortly after the link settles.
-                    applyCurrentMode()
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (_connectionState.value == ConnectionState.Connected) applyCurrentMode()
-                    }, 400L)
+                    // Synchronize all active sensor settings (Pause/Resume, Ranges, ODRs, and Stream Mode)
+                    // through the serialized GATT command queue once CCCD write finishes.
+                    syncFullConfigurationToDevice()
                 } else {
                     disconnect()
+                }
+            }
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            Log.i(BLE_TAG, "Descriptor write completed: uuid=${descriptor.uuid} status=$status")
+            mainHandler.post {
+                mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                isGattBusy = false
+                processNextCommand()
+            }
+        }
+
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid == RX_CHAR_UUID) {
+                Log.d(BLE_TAG, "RX characteristic write completed (status=$status)")
+                mainHandler.post {
+                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                    isGattBusy = false
+                    processNextCommand()
                 }
             }
         }
@@ -1206,6 +1246,11 @@ class BleViewModel : ViewModel() {
     fun disconnect() {
         stopScan()
         _isPaused.value = false
+        mainHandler.post {
+            mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+            commandQueue.clear()
+            isGattBusy = false
+        }
         bluetoothGatt?.disconnect()
         _connectionState.value = ConnectionState.Disconnected
     }
@@ -1242,6 +1287,16 @@ class BleViewModel : ViewModel() {
         val changed = _selectedMode.value != mode
         _selectedMode.value = mode
         if (changed) clearLogs()
+        // Ensure the active sensor(s) for the chosen stream mode are not stuck in power-down ("off")
+        if ((mode == GraphMode.LOW_G || mode == GraphMode.BOTH_ACC || mode == GraphMode.ALL) && _lowGOdr.value == "off") {
+            setLowGOdr("120hz")
+        }
+        if ((mode == GraphMode.HIGH_G || mode == GraphMode.BOTH_ACC) && _highGOdr.value == "off") {
+            setHighGOdr("480hz")
+        }
+        if ((mode == GraphMode.GYRO || mode == GraphMode.ALL) && _gyroOdr.value == "off") {
+            setGyroOdr("120hz")
+        }
         // Always (re)send the mode command when connected — including when the
         // user re-taps the already-selected mode, to recover from a lost
         // connect-time command.
@@ -1250,8 +1305,24 @@ class BleViewModel : ViewModel() {
 
     private fun applyCurrentMode() {
         if (_connectionState.value == ConnectionState.Connected) {
-            sendCommand(_selectedMode.value.command + "\r\n")
+            sendCommand(_selectedMode.value.command)
         }
+    }
+
+    /**
+     * Pushes all current sensor parameters (Pause/Resume, Full-Scale Ranges, ODRs, and Stream Mode)
+     * to the ESP32 through the serialized BLE GATT command queue.
+     */
+    fun syncFullConfigurationToDevice() {
+        if (_connectionState.value != ConnectionState.Connected) return
+        sendCommand(if (_isPaused.value) "pause" else "resume")
+        sendCommand("range_low_g_${_lowGRange.value}")
+        sendCommand("range_high_g_${_highGRange.value}")
+        sendCommand("range_gyro_${_gyroRange.value}")
+        sendCommand("odr_low_g_${_lowGOdr.value}")
+        sendCommand("odr_high_g_${_highGOdr.value}")
+        sendCommand("odr_gyro_${_gyroOdr.value}")
+        sendCommand(_selectedMode.value.command)
     }
 
     private fun processIncomingLine(rawLine: String): Boolean {
@@ -1369,13 +1440,33 @@ class BleViewModel : ViewModel() {
     }
 
     fun applyExperimentMode(mode: ExperimentMode) {
-        selectMode(mode.streamMode)
-        mode.lowGOdr?.let { setLowGOdr(it) }
-        mode.highGOdr?.let { setHighGOdr(it) }
-        mode.gyroOdr?.let { setGyroOdr(it) }
+        // Unpause if a previous experiment's auto-trigger had paused the sensor
+        if (_isPaused.value) {
+            _isPaused.value = false
+            if (_connectionState.value == ConnectionState.Connected) {
+                sendCommand("resume")
+            }
+        }
+
+        // 1. Configure Full-Scale Ranges first
         mode.lowGRange?.let { setLowGRange(it) }
         mode.highGRange?.let { setHighGRange(it) }
         mode.gyroRange?.let { setGyroRange(it) }
+
+        // 2. Configure Output Data Rates (ODRs)
+        mode.lowGOdr?.let { setLowGOdr(it) }
+        if (mode.highGOdr != null) {
+            setHighGOdr(mode.highGOdr)
+        } else if (mode.streamMode == GraphMode.ALL) {
+            // In ALL mode (Low-G + Gyro), power down High-G if not explicitly used so
+            // INT1 routes to the 120 Hz Low-G/Gyro instead of 480+ Hz High-G
+            setHighGOdr("off")
+        }
+        mode.gyroOdr?.let { setGyroOdr(it) }
+
+        // 3. Set active stream mode last so the ESP32 flushes any stale batch and
+        // recomputes timing/INT1 routing with the newly applied ODRs
+        selectMode(mode.streamMode)
 
         setFilterEnabled(mode.filterEnabled)
         if (mode.filterEnabled) {
@@ -1429,16 +1520,54 @@ class BleViewModel : ViewModel() {
     }
 
     fun sendCommand(command: String) {
-        val gatt = bluetoothGatt ?: return
-        val char = rxCharacteristic ?: return
-        val bytes = command.toByteArray(Charsets.UTF_8)
+        val cleanCmd = command.trim()
+        if (cleanCmd.isEmpty()) return
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        mainHandler.post {
+            if (_connectionState.value != ConnectionState.Connected) return@post
+            if (commandQueue.lastOrNull() != cleanCmd) {
+                commandQueue.addLast(cleanCmd)
+            }
+            processNextCommand()
+        }
+    }
+
+    private fun processNextCommand() {
+        if (isGattBusy) return
+        if (_connectionState.value != ConnectionState.Connected) {
+            commandQueue.clear()
+            return
+        }
+        val gatt = bluetoothGatt ?: run {
+            commandQueue.clear()
+            return
+        }
+        val char = rxCharacteristic ?: run {
+            commandQueue.clear()
+            return
+        }
+        val nextCmd = commandQueue.removeFirstOrNull() ?: return
+
+        isGattBusy = true
+        val bytes = (nextCmd + "\r\n").toByteArray(Charsets.UTF_8)
+
+        val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
         } else {
             char.value = bytes
             char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             gatt.writeCharacteristic(char)
+        }
+
+        Log.i(BLE_TAG, "Sent BLE command '$nextCmd' (started=$started, remaining=${commandQueue.size})")
+        if (started) {
+            mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+            mainHandler.postDelayed(gattWriteTimeoutRunnable, 250L)
+        } else {
+            // Stack was momentarily busy (e.g. MTU/PHY/CCCD in flight); requeue at head and retry shortly
+            isGattBusy = false
+            commandQueue.addFirst(nextCmd)
+            mainHandler.postDelayed({ processNextCommand() }, 60L)
         }
     }
 }

@@ -83,6 +83,16 @@ fun ExperimentScreen(
     var yawOffset by remember { mutableStateOf(0f) }
     var isGraphViewForced by remember { mutableStateOf(false) }
 
+    // Mathematics Lab state
+    var mathState by remember(mode.id) {
+        mutableStateOf(
+            MathUiState(
+                sourceA = mode.defaultSignalSource ?: SignalSource.LOW_G_Z,
+                sourceB = mode.defaultSecondSource ?: SignalSource.LOW_G_X
+            )
+        )
+    }
+
     var showOdrInfoDialog by remember { mutableStateOf(false) }
     var showTimeWindowInfoDialog by remember { mutableStateOf(false) }
     var showFilterInfoDialog by remember { mutableStateOf(false) }
@@ -93,6 +103,56 @@ fun ExperimentScreen(
     LaunchedEffect(mode.id) {
         viewModel.applyExperimentMode(mode)
     }
+
+    // Automatically ensure the required sensor stream and ODR are active when user switches SignalSource in Math mode
+    LaunchedEffect(mode.isMathMode, mathState.sourceA, mathState.sourceB) {
+        if (mode.isMathMode) {
+            val second = if (mode.mathOperation == MathOperation.COMPARATOR) mathState.sourceB else null
+            val requiredMode = MathEngine.resolveRequiredGraphMode(mathState.sourceA, second)
+            val usesLowG = mathState.sourceA.requiredMode == GraphMode.LOW_G || second?.requiredMode == GraphMode.LOW_G
+            val usesHighG = mathState.sourceA.requiredMode == GraphMode.HIGH_G || second?.requiredMode == GraphMode.HIGH_G
+            val usesGyro = mathState.sourceA.requiredMode == GraphMode.GYRO || second?.requiredMode == GraphMode.GYRO
+
+            if (usesLowG && lowGOdr == "off") {
+                viewModel.setLowGOdr(mode.lowGOdr ?: "240hz")
+            }
+            if (usesHighG && highGOdr == "off") {
+                viewModel.setHighGOdr(mode.highGOdr?.takeIf { it != "off" } ?: "480hz")
+            } else if (!usesHighG && requiredMode == GraphMode.ALL && highGOdr != "off") {
+                viewModel.setHighGOdr("off")
+            }
+            if (usesGyro && gyroOdr == "off") {
+                viewModel.setGyroOdr(mode.gyroOdr ?: "240hz")
+            }
+            if (selectedMode != requiredMode) {
+                viewModel.selectMode(requiredMode)
+            }
+        }
+    }
+
+    fun parseOdrSuffixToHz(suffix: String): Float = when (suffix) {
+        "off" -> 0f
+        "1hz875" -> 1.875f
+        "7hz5" -> 7.5f
+        "15hz" -> 15f
+        "30hz" -> 30f
+        "60hz" -> 60f
+        "120hz" -> 120f
+        "240hz" -> 240f
+        "480hz" -> 480f
+        "960hz" -> 960f
+        "1920hz" -> 1920f
+        "3840hz" -> 3840f
+        "7680hz" -> 7680f
+        else -> suffix.replace("hz", "").toFloatOrNull() ?: 120f
+    }
+
+    val activeMathOdrHz = when (mathState.sourceA.requiredMode) {
+        GraphMode.LOW_G -> parseOdrSuffixToHz(lowGOdr)
+        GraphMode.HIGH_G -> parseOdrSuffixToHz(highGOdr)
+        GraphMode.GYRO -> parseOdrSuffixToHz(gyroOdr)
+        else -> parseOdrSuffixToHz(lowGOdr)
+    }.coerceAtLeast(1f)
 
     val cutoffHz = viewModel.getCalculatedCutoffFrequency()
     val cutoffText = if (cutoffHz >= 1000f) {
@@ -237,10 +297,16 @@ fun ExperimentScreen(
                 }
             }
 
-            // Real-time View Area (3D Airplane or Chart)
+            // Real-time View Area (3D Airplane, Math Dual Plot, or Standard Chart)
             Box(
                 modifier = Modifier
-                    .weight(if (mode.is3dAirplaneMode && !isGraphViewForced) 1.35f else 1.15f)
+                    .weight(
+                        when {
+                            mode.is3dAirplaneMode && !isGraphViewForced -> 1.35f
+                            mode.isMathMode -> 1.30f
+                            else -> 1.15f
+                        }
+                    )
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 2.dp)
                     .background(Color(0xFF0A0E17))
@@ -261,6 +327,15 @@ fun ExperimentScreen(
                         gForce = attitude.gForce,
                         turnRateDps = attitude.turnRateDps,
                         onZeroHeading = { yawOffset = attitude.yawDeg },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (mode.isMathMode && mode.mathOperation != null) {
+                    MathWorkspacePlotArea(
+                        operation = mode.mathOperation,
+                        state = mathState,
+                        chartData = chartData,
+                        odrHz = activeMathOdrHz,
+                        timeWindowSec = timeWindowSec,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -302,6 +377,24 @@ fun ExperimentScreen(
                     .weight(1.1f)
                     .verticalScroll(rememberScrollState())
             ) {
+                // Mathematics Lab Axis & Operation Controls + Live Telemetry
+                if (mode.isMathMode && mode.mathOperation != null) {
+                    MathControlCard(
+                        operation = mode.mathOperation,
+                        state = mathState,
+                        odrHz = activeMathOdrHz,
+                        onStateChange = { mathState = it },
+                        onResetData = { viewModel.clearLogs() }
+                    )
+                    MathAnalysisResultCard(
+                        operation = mode.mathOperation,
+                        state = mathState,
+                        chartData = chartData,
+                        odrHz = activeMathOdrHz,
+                        timeWindowSec = timeWindowSec
+                    )
+                }
+
                 // Analysis Results Panel
                 val points = when(selectedMode) {
                     GraphMode.LOW_G -> chartData.lowG
