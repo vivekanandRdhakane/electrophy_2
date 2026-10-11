@@ -89,7 +89,8 @@ val TX_CHAR_UUID: UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E") // Write (App -> ESP)
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
-private const val MAX_CHART_POINTS = 1500
+private const val CHART_MAX_DURATION_MS = 35_000f // Retains 35s history to guarantee 30s viewport availability
+private const val CHART_MAX_POINTS_CAP = 50_000   // Safety cap against OOM at multi-kHz rates
 private const val SAMPLE_RATE_UPDATE_INTERVAL_MS = 2_000L
 private const val PREFERRED_BLE_MTU = 517
 private const val BLE_TAG = "ElectrophyBLE"
@@ -492,6 +493,10 @@ class BleViewModel : ViewModel() {
         }
     }
 
+    private val lowGBuffer = DurationBoundedBuffer(maxDurationMs = CHART_MAX_DURATION_MS, maxPoints = CHART_MAX_POINTS_CAP)
+    private val highGBuffer = DurationBoundedBuffer(maxDurationMs = CHART_MAX_DURATION_MS, maxPoints = CHART_MAX_POINTS_CAP)
+    private val gyroBuffer = DurationBoundedBuffer(maxDurationMs = CHART_MAX_DURATION_MS, maxPoints = CHART_MAX_POINTS_CAP)
+
     private val _chartData = MutableStateFlow(ChartData())
     val chartData: StateFlow<ChartData> = _chartData
 
@@ -835,90 +840,23 @@ class BleViewModel : ViewModel() {
     }
 
     private fun processBinaryPacket(bytes: ByteArray) {
-        if (bytes.size < 9) return
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val magic0 = buffer.get()
-        val magic1 = buffer.get()
-        val mode = buffer.get().toInt() and 0xFF
-        val sampleCount = buffer.get().toInt() and 0xFF
-        val xlFs = buffer.get().toInt() and 0xFF
-        val hgFs = buffer.get().toInt() and 0xFF
-        val gyFs = buffer.get().toInt() and 0xFF
-        val seq = buffer.get().toInt() and 0xFF
-        val fmt = buffer.get().toInt() and 0xFF
-
-        if (sampleCount == 0) return
-
-        val packed12 = fmt == 1
-
-        // Sensitivity factors centralized in SensorConversion (per ST driver)
-        val rawXlScale = SensorConversion.getLowGScale(xlFs, packed12)
-        val rawHgScale = SensorConversion.getHighGScale(hgFs, packed12)
-        val rawGyScale = SensorConversion.getGyroScale(gyFs, packed12)
-
-        // Reject packets with unknown range codes for active sensors
-        when (mode) {
-            1 -> if (rawXlScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown xlFs=$xlFs, dropping frame"); return }
-            2 -> if (rawHgScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown hgFs=$hgFs, dropping frame"); return }
-            3 -> if (rawXlScale == null || rawHgScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown xlFs=$xlFs or hgFs=$hgFs, dropping frame"); return }
-            4 -> if (rawGyScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown gyFs=$gyFs, dropping frame"); return }
-            0 -> if (rawXlScale == null || rawHgScale == null || rawGyScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown range code in ALL mode, dropping frame"); return }
+        val decoded = when (val res = PacketDecoder.decode(bytes)) {
+            is DecodeResult.Success -> res.packet
+            is DecodeResult.Error -> {
+                Log.w(BLE_TAG, "processBinaryPacket: dropped invalid frame: ${res.reason}")
+                return
+            }
         }
-
-        val xlScale = rawXlScale ?: 0f
-        val hgScale = rawHgScale ?: 0f
-        val gyScale = rawGyScale ?: 0f
-
-        val lowGList = mutableListOf<AxisPoint>()
-        val highGList = mutableListOf<AxisPoint>()
-        val gyroList = mutableListOf<AxisPoint>()
 
         val rawNowMs = System.currentTimeMillis() - sessionStartTimeMs
         val nowMs = if (rawNowMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawNowMs
-        val dt = (nowMs - lastAssignedTimeMs).toFloat() / sampleCount.coerceAtLeast(1)
+        val dt = (nowMs - lastAssignedTimeMs).toFloat() / decoded.sampleCount.coerceAtLeast(1)
         val baseTime = lastAssignedTimeMs
         lastAssignedTimeMs = nowMs
 
-        val reader = if (packed12) BitReader(bytes, startBit = 9 * 8) else null
-
-        // Reads one axis in the current format and scales it.
-        fun readAxis(scale: Float): Float =
-            if (packed12) reader!!.readSigned12() * scale else buffer.short * scale
-
-        for (i in 0 until sampleCount) {
-            val t = (baseTime + dt * (i + 1))
-
-            when (mode) {
-                1 -> { // LOW_ACC
-                    if (!packed12 && buffer.remaining() < 6) break
-                    lowGList.add(AxisPoint(readAxis(xlScale), readAxis(xlScale), readAxis(xlScale), time = t))
-                }
-                2 -> { // HIGH_ACC
-                    if (!packed12 && buffer.remaining() < 6) break
-                    highGList.add(AxisPoint(readAxis(hgScale), readAxis(hgScale), readAxis(hgScale), time = t))
-                }
-                3 -> { // BOTH_ACC
-                    if (!packed12 && buffer.remaining() < 12) break
-                    val lgX = readAxis(xlScale); val lgY = readAxis(xlScale); val lgZ = readAxis(xlScale)
-                    val hgX = readAxis(hgScale); val hgY = readAxis(hgScale); val hgZ = readAxis(hgScale)
-                    lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
-                    highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
-                }
-                4 -> { // ONLY_GYRO
-                    if (!packed12 && buffer.remaining() < 6) break
-                    gyroList.add(AxisPoint(readAxis(gyScale), readAxis(gyScale), readAxis(gyScale), time = t))
-                }
-                0 -> { // ALL
-                    if (!packed12 && buffer.remaining() < 18) break
-                    val lgX = readAxis(xlScale); val lgY = readAxis(xlScale); val lgZ = readAxis(xlScale)
-                    val hgX = readAxis(hgScale); val hgY = readAxis(hgScale); val hgZ = readAxis(hgScale)
-                    val gyX = readAxis(gyScale); val gyY = readAxis(gyScale); val gyZ = readAxis(gyScale)
-                    lowGList.add(AxisPoint(lgX, lgY, lgZ, time = t))
-                    highGList.add(AxisPoint(hgX, hgY, hgZ, time = t))
-                    gyroList.add(AxisPoint(gyX, gyY, gyZ, time = t))
-                }
-            }
-        }
+        val lowGList = decoded.lowG.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
+        val highGList = decoded.highG.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
+        val gyroList = decoded.gyro.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
 
         val filteredLowG = filterLowG(lowGList)
         val filteredHighG = filterHighG(highGList)
@@ -953,7 +891,7 @@ class BleViewModel : ViewModel() {
                 filteredGyro.map { AxisPoint(it.x - offsets.gyroX, it.y - offsets.gyroY, it.z - offsets.gyroZ, it.time) }
             } else filteredGyro
 
-            val terminalLine = when (mode) {
+            val terminalLine = when (decoded.mode) {
                 1 -> {
                     val pt = dispLowG.lastOrNull()
                     if (pt != null) String.format(Locale.US, "[Low-G mg] X=%7.2f Y=%7.2f Z=%7.2f", pt.x, pt.y, pt.z) else null
@@ -1053,13 +991,15 @@ class BleViewModel : ViewModel() {
 
         updateAttitudeFromBatch(effLowG, effGyro)
 
-        _chartData.update { current ->
-            current.copy(
-                lowG = if (effLowG.isNotEmpty()) (current.lowG + effLowG).takeLast(MAX_CHART_POINTS) else current.lowG,
-                highG = if (newHighG.isNotEmpty()) (current.highG + newHighG).takeLast(MAX_CHART_POINTS) else current.highG,
-                gyro = if (effGyro.isNotEmpty()) (current.gyro + effGyro).takeLast(MAX_CHART_POINTS) else current.gyro,
-            )
-        }
+        if (effLowG.isNotEmpty()) lowGBuffer.append(effLowG)
+        if (newHighG.isNotEmpty()) highGBuffer.append(newHighG)
+        if (effGyro.isNotEmpty()) gyroBuffer.append(effGyro)
+
+        _chartData.value = ChartData(
+            lowG = lowGBuffer.getPoints(),
+            highG = highGBuffer.getPoints(),
+            gyro = gyroBuffer.getPoints()
+        )
     }
 
     private fun updateAttitudeFromBatch(
@@ -1357,13 +1297,15 @@ class BleViewModel : ViewModel() {
             updateAttitudeSingle(effLowG, effGyro)
         }
 
-        _chartData.update { current ->
-            current.copy(
-                lowG = if (effLowG != null) (current.lowG + effLowG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.lowG,
-                highG = if (highG != null) (current.highG + highG.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.highG,
-                gyro = if (effGyro != null) (current.gyro + effGyro.copy(time = timeFloat)).takeLast(MAX_CHART_POINTS) else current.gyro,
-            )
-        }
+        if (effLowG != null) lowGBuffer.append(effLowG.copy(time = timeFloat))
+        if (highG != null) highGBuffer.append(highG.copy(time = timeFloat))
+        if (effGyro != null) gyroBuffer.append(effGyro.copy(time = timeFloat))
+
+        _chartData.value = ChartData(
+            lowG = lowGBuffer.getPoints(),
+            highG = highGBuffer.getPoints(),
+            gyro = gyroBuffer.getPoints()
+        )
     }
 
     fun applyExperimentMode(mode: ExperimentMode) {
@@ -1413,6 +1355,9 @@ class BleViewModel : ViewModel() {
     }
 
     fun clearLogs() {
+        lowGBuffer.clear()
+        highGBuffer.clear()
+        gyroBuffer.clear()
         _logMessages.value = emptyList()
         _chartData.value = ChartData()
         resetSession()
@@ -2619,6 +2564,8 @@ private fun SensorChart(
     var showX by remember { mutableStateOf(true) }
     var showY by remember { mutableStateOf(true) }
     var showZ by remember { mutableStateOf(true) }
+    val defaultMinSpan = if (title.contains("(g)")) 2.0f else 20.0f
+    val yScaler = remember(title) { SmoothAxisScaler(minSpan = defaultMinSpan, expandAlpha = 0.60f, contractAlpha = 0.02f) }
 
     var viewEndTimeMs by remember { mutableStateOf<Float?>(null) }
     var prevTimeWindowSec by remember { mutableStateOf(timeWindowSec) }
@@ -2631,6 +2578,7 @@ private fun SensorChart(
     LaunchedEffect(isPaused) {
         if (!isPaused) {
             viewEndTimeMs = null
+            yScaler.reset()
         }
     }
 
@@ -2800,10 +2748,11 @@ private fun SensorChart(
                     chart.xAxis.axisMaximum = if (!isPaused && endT < windowMs) windowMs else endT
 
                     val filtered = getVisiblePoints(points, startT, endT)
+                    val decimated = ChartDecimator.decimate(filtered, maxTargetPoints = 2000)
 
-                    val entriesX = filtered.map { Entry(it.time, it.x) }
-                    val entriesY = filtered.map { Entry(it.time, it.y) }
-                    val entriesZ = filtered.map { Entry(it.time, it.z) }
+                    val entriesX = decimated.map { Entry(it.time, it.x) }
+                    val entriesY = decimated.map { Entry(it.time, it.y) }
+                    val entriesZ = decimated.map { Entry(it.time, it.z) }
 
                     val dataSets = mutableListOf<LineDataSet>()
                     if (showX) {
@@ -2829,6 +2778,33 @@ private fun SensorChart(
                             lineWidth = 2f
                             setDrawValues(false)
                         })
+                    }
+
+                    var rawMinY = Float.MAX_VALUE
+                    var rawMaxY = -Float.MAX_VALUE
+                    if (showX && entriesX.isNotEmpty()) {
+                        for (e in entriesX) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+                    if (showY && entriesY.isNotEmpty()) {
+                        for (e in entriesY) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+                    if (showZ && entriesZ.isNotEmpty()) {
+                        for (e in entriesZ) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+
+                    if (rawMinY != Float.MAX_VALUE && rawMaxY != -Float.MAX_VALUE) {
+                        val (smoothMin, smoothMax) = yScaler.update(rawMinY, rawMaxY, immediate = isPaused)
+                        chart.axisLeft.axisMinimum = smoothMin
+                        chart.axisLeft.axisMaximum = smoothMax
                     }
 
                     val data = LineData(dataSets.map { it as ILineDataSet })

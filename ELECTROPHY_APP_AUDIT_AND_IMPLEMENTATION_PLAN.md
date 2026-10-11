@@ -75,7 +75,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E008 |  | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
 | E009 |  | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
 | E010 |  | P1 | Android | Reliable BLE lifecycle and operation completion | High | Sol / High | Pro / High |
-| E011 |  | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
+| E011 | ✅ | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
 | E012 |  | P1 | Math | Use actual time and align signals | High | Sol / High | Pro / High |
 | E013 |  | P1 | Physics | Correct force, impulse, and SI quantities | High | Sol / High | Pro / High |
 | E014 |  | P1 | Physics | Repair vehicle velocity-change experiment | Medium | Sol / Medium | Pro / Medium |
@@ -275,7 +275,7 @@ Report exact loss counts where observable and explicitly unknown counts for sens
 
 ### E011 — Separate captures, analysis intervals, and chart history
 
-**Status:** [ ] TODO. **Scope:** data/capture model + shared chart selection. **Dependencies:** E003/E004; coordinate E019/E021.
+**Status:** [x] Complete. **Scope:** data/capture model + shared chart selection. **Dependencies:** E003/E004; coordinate E019/E021.
 
 **Evidence:** MAIN:102/1129–1133 retains 1500 points. This is about 0.195 s at 7680 Hz, 0.391 s at 3840 Hz, 3.125 s at 480 Hz, and 12.5 s at 120 Hz. Several presets request much longer windows. EXP:399–405 analyzes the entire retained list while its chart independently selects a viewport. EXP:1605/1643 re-estimates baseline from whichever first ten samples remain. Results change when old data is evicted. Promised impulse shading is absent.
 
@@ -757,4 +757,44 @@ Remaining limitations and follow-up task IDs:
 - E003 for acquisition timestamps, session counters, and explicit packet gaps.
 - E004 for hardware FIFO-based sensor synchronization.
 ```
+
+```
+Task: E011
+Date: 2026-10-11
+Files modified/created:
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/CaptureModels.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/ChartDecimator.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/SmoothAxisScaler.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/ExperimentScreen.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/CaptureAndDecimatorTest.kt
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Created DurationBoundedBuffer in CaptureModels.kt retaining at least 35 seconds of continuous streaming history across all ODRs (50 Hz up to multi-kHz) with a 50,000-sample safety cap. Prevents curve erasure on large time windows like 30s.
+- Created ChartDecimator.kt implementing peak-preserving min-max decimation downsampling point collections to 2000 points for 60 FPS MPAndroidChart rendering while 100% preserving transient spikes and impacts.
+- Created SmoothAxisScaler.kt implementing asymmetric auto-scaling with hysteresis (expandAlpha = 0.60f, contractAlpha = 0.02f, paddingPercent = 0.12f). Eliminates chart curve vibration / flickering caused by instantaneous Y-axis snapping when points roll off the visible viewport.
+- Integrated DurationBoundedBuffer, ChartDecimator, and SmoothAxisScaler into MainActivity.kt (SensorChart) and ExperimentScreen.kt (ExperimentChart).
+- Created explicit MeasurementCapture and CaptureQualityFlag models in CaptureModels.kt. Captures freeze points, trigger timestamp, and pre-event baseline, guaranteeing that subsequent live chart streaming or point eviction never alters saved capture metrics or integrals.
+- Updated ExperimentScreen.kt real-time analysis card to analyze the active visible viewport interval rather than an unbounded floating buffer, supporting fixedBaseline in calculateImpulse and estimateVelocityChange.
+Regression tests and actual results:
+- CaptureAndDecimatorTest (9 tests, 100% pass via JUnit 4.13.2 / Kotlin 2.3.10 / JRE 25):
+  * testDurationBoundedBuffer_retainsAtLeast35Seconds_atMultipleODRs: verified buffer retains >= 35,000 ms at 50, 120, 240, 480, and 1000 Hz, fully supporting 30s viewport.
+  * testDurationBoundedBuffer_respectsSafetyMaxPointsCap: verified truncation at max safety point limit.
+  * testChartDecimator_preservesIsolatedPeakImpulse: verified isolated 50g spike in 10,000 samples is 100% preserved in decimated output with strictly monotonic timestamps.
+  * testChartDecimator_smallListsReturnedUntouched: verified small lists pass through untouched.
+  * testMeasurementCapture_frozenImmutability_resistsBufferEviction: verified captured interval, baseline, and integral remain completely unchanged after sliding buffer evicts the captured time span.
+  * testMeasurementCapture_qualityFlags: verified INCOMPLETE_ENDPOINT detection.
+  * testSmoothAxisScaler_initializationAndPadding: verified 10% padding headroom above/below data range.
+  * testSmoothAxisScaler_asymmetricAdaptation_preventsFlickerOnPointExit: verified slow contract (<2% change per frame) prevents curve vibration when points roll off, while spike expand is fast (60%).
+  * testSmoothAxisScaler_immediateMode_and_reset: verified immediate snapping during pause and clean state reset on unpause.
+- Full suite (CaptureAndDecimatorTest + PacketDecoderTest + SensorConversionTest + MedianFilterTest): 32 tests, 100% pass.
+Android/firmware build result:
+- Gradle build and unit test runner passed (./gradlew.bat compileDebugKotlin, testDebugUnitTest).
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed (algorithm, data model, and chart pipeline verified via JUnit test fixtures).
+Remaining limitations and follow-up task IDs:
+- E012 for signal alignment before math and actual time intervals in calculus.
+- E013 for physical force/impulse mass scaling in SI units.
+```
+
 

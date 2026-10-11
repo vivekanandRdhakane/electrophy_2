@@ -395,14 +395,20 @@ fun ExperimentScreen(
                     )
                 }
 
-                // Analysis Results Panel
-                val points = when(selectedMode) {
+                // Analysis Results Panel (analyzes the active visible viewport interval)
+                val rawPoints = when(selectedMode) {
                     GraphMode.LOW_G -> chartData.lowG
                     GraphMode.HIGH_G -> chartData.highG
                     GraphMode.GYRO -> chartData.gyro
                     GraphMode.BOTH_ACC -> chartData.lowG
                     GraphMode.ALL -> chartData.lowG
                 }
+                val points = if (rawPoints.isNotEmpty()) {
+                    val maxT = rawPoints.last().time
+                    val winMs = timeWindowSec * 1000f
+                    val startT = (maxT - winMs).coerceAtLeast(0f)
+                    getVisiblePoints(rawPoints, startT, maxT)
+                } else emptyList()
 
                 if (mode.showPeakForce || mode.showImpulse || mode.showPeriodDetection || mode.showVelocityIntegration || mode.showFreeFallDetection) {
                     Card(
@@ -1201,6 +1207,8 @@ private fun ExperimentChart(
     var cursor1 by remember(isPaused) { mutableStateOf<Entry?>(null) }
     var cursor2 by remember(isPaused) { mutableStateOf<Entry?>(null) }
     val chartRef = remember { mutableStateOf<LineChart?>(null) }
+    val defaultMinSpan = if (title.contains("(g)") || title.contains("(dps)") || title.contains("(rad/s)")) 2.0f else 20.0f
+    val yScaler = remember(title) { SmoothAxisScaler(minSpan = defaultMinSpan, expandAlpha = 0.60f, contractAlpha = 0.02f) }
 
     var viewEndTimeMs by remember { mutableStateOf<Float?>(null) }
     var prevTimeWindowSec by remember { mutableStateOf(timeWindowSec) }
@@ -1213,6 +1221,7 @@ private fun ExperimentChart(
     LaunchedEffect(isPaused) {
         if (!isPaused) {
             viewEndTimeMs = null
+            yScaler.reset()
         }
     }
 
@@ -1382,10 +1391,11 @@ private fun ExperimentChart(
                     chart.xAxis.axisMaximum = if (!isPaused && endT < windowMs) windowMs else endT
 
                     val filtered = getVisiblePoints(points, startT, endT)
+                    val decimated = ChartDecimator.decimate(filtered, maxTargetPoints = 2000)
 
-                    val entriesX = filtered.map { Entry(it.time, it.x) }
-                    val entriesY = filtered.map { Entry(it.time, it.y) }
-                    val entriesZ = filtered.map { Entry(it.time, it.z) }
+                    val entriesX = decimated.map { Entry(it.time, it.x) }
+                    val entriesY = decimated.map { Entry(it.time, it.y) }
+                    val entriesZ = decimated.map { Entry(it.time, it.z) }
 
                     val dataSets = mutableListOf<LineDataSet>()
                     if (showX) {
@@ -1411,6 +1421,33 @@ private fun ExperimentChart(
                             lineWidth = 2f
                             setDrawValues(false)
                         })
+                    }
+
+                    var rawMinY = Float.MAX_VALUE
+                    var rawMaxY = -Float.MAX_VALUE
+                    if (showX && entriesX.isNotEmpty()) {
+                        for (e in entriesX) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+                    if (showY && entriesY.isNotEmpty()) {
+                        for (e in entriesY) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+                    if (showZ && entriesZ.isNotEmpty()) {
+                        for (e in entriesZ) {
+                            if (e.y < rawMinY) rawMinY = e.y
+                            if (e.y > rawMaxY) rawMaxY = e.y
+                        }
+                    }
+
+                    if (rawMinY != Float.MAX_VALUE && rawMaxY != -Float.MAX_VALUE) {
+                        val (smoothMin, smoothMax) = yScaler.update(rawMinY, rawMaxY, immediate = isPaused)
+                        chart.axisLeft.axisMinimum = smoothMin
+                        chart.axisLeft.axisMaximum = smoothMax
                     }
 
                     chart.data = LineData(dataSets.map { it as ILineDataSet })
@@ -1599,10 +1636,10 @@ private fun findPeakValues(points: List<AxisPoint>): Triple<Float, Float, Float>
     return Triple(maxX, maxY, maxZ)
 }
 
-private fun calculateImpulse(points: List<AxisPoint>, odrHz: Float): Float {
+private fun calculateImpulse(points: List<AxisPoint>, odrHz: Float, fixedBaseline: Float? = null): Float {
     if (points.isEmpty() || odrHz <= 0f) return 0f
     val dt = 1f / odrHz
-    val baseline = points.take(10).map { it.z }.average().toFloat().takeIf { !it.isNaN() } ?: 0f
+    val baseline = fixedBaseline ?: (points.take(10).map { it.z }.average().toFloat().takeIf { !it.isNaN() } ?: 0f)
     
     var integral = 0f
     for (p in points) {
@@ -1637,10 +1674,10 @@ private fun detectPeriod(points: List<AxisPoint>): Float? {
     return periods.average().toFloat().takeIf { !it.isNaN() }
 }
 
-private fun estimateVelocityChange(points: List<AxisPoint>, odrHz: Float): Float {
+private fun estimateVelocityChange(points: List<AxisPoint>, odrHz: Float, fixedBaseline: Float? = null): Float {
     if (points.isEmpty() || odrHz <= 0f) return 0f
     val dt = 1f / odrHz
-    val baseline = points.take(10).map { it.z }.average().toFloat().takeIf { !it.isNaN() } ?: 0f
+    val baseline = fixedBaseline ?: (points.take(10).map { it.z }.average().toFloat().takeIf { !it.isNaN() } ?: 0f)
     
     var velocity = 0f
     for (p in points) {
