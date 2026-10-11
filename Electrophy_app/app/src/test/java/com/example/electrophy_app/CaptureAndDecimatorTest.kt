@@ -214,5 +214,37 @@ class CaptureAndDecimatorTest {
         assertEquals(49.0f, freshMin, 0.01f)
         assertEquals(61.0f, freshMax, 0.01f)
     }
+
+    @Test
+    fun testRangeLimitResolver_lowG_highG_and_gyro() {
+        // Low-G in mg: 4g -> 4000 mg
+        val lgMg = RangeLimitResolver.resolve("Low-G Accelerometer (mg)", "4g")
+        assertEquals(4000f, lgMg?.limitValue ?: 0f, 0.01f)
+        assertEquals("+4g Limit", lgMg?.posLabel)
+        assertEquals("-4g Limit", lgMg?.negLabel)
+
+        // Low-G in g: 4g -> 4 g
+        val lgG = RangeLimitResolver.resolve("Free Fall (g)", "4g")
+        assertEquals(4f, lgG?.limitValue ?: 0f, 0.01f)
+
+        // High-G in g: 32g -> 32 g
+        val hg = RangeLimitResolver.resolve("High-G Accelerometer (g)", "32g")
+        assertEquals(32f, hg?.limitValue ?: 0f, 0.01f)
+        assertEquals("+32g Limit", hg?.posLabel)
+
+        // Gyroscope in mdps: 2000dps -> 2,000,000 mdps
+        val gyroMdps = RangeLimitResolver.resolve("Gyroscope (mdps)", "2000dps")
+        assertEquals(2_000_000f, gyroMdps?.limitValue ?: 0f, 0.01f)
+        assertEquals("+2000 dps Limit", gyroMdps?.posLabel)
+
+        // Gyroscope in dps: 2000dps -> 2000 dps
+        val gyroDps = RangeLimitResolver.resolve("Gyroscope (dps)", "2000dps")
+        assertEquals(2000f, gyroDps?.limitValue ?: 0f, 0.01f)
+
+        // Null and invalid inputs
+        assertEquals(null, RangeLimitResolver.resolve("Low-G", null))
+        assertEquals(null, RangeLimitResolver.resolve("Low-G", ""))
+        assertEquals(null, RangeLimitResolver.resolve("Low-G", "unknown"))
+    }
 }
 

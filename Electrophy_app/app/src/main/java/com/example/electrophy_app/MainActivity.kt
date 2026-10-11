@@ -71,6 +71,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
+import com.github.mikephil.charting.components.LimitLine
 import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.components.YAxis
 import com.github.mikephil.charting.data.Entry
@@ -1736,6 +1737,7 @@ fun BleAppScreen(
                         points = chartData.lowG,
                         timeWindowSec = timeWindowSec,
                         isPaused = isPaused,
+                        rangeSuffix = lowGRange,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.HIGH_G -> SensorChart(
@@ -1743,6 +1745,7 @@ fun BleAppScreen(
                         points = chartData.highG,
                         timeWindowSec = timeWindowSec,
                         isPaused = isPaused,
+                        rangeSuffix = highGRange,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.GYRO -> SensorChart(
@@ -1750,6 +1753,7 @@ fun BleAppScreen(
                         points = chartData.gyro,
                         timeWindowSec = timeWindowSec,
                         isPaused = isPaused,
+                        rangeSuffix = gyroRange,
                         modifier = Modifier.fillMaxSize(),
                     )
                     GraphMode.BOTH_ACC -> Column(modifier = Modifier.fillMaxSize()) {
@@ -1758,6 +1762,7 @@ fun BleAppScreen(
                             points = chartData.lowG,
                             timeWindowSec = timeWindowSec,
                             isPaused = isPaused,
+                            rangeSuffix = lowGRange,
                             modifier = Modifier.weight(1f),
                         )
                         SensorChart(
@@ -1765,6 +1770,7 @@ fun BleAppScreen(
                             points = chartData.highG,
                             timeWindowSec = timeWindowSec,
                             isPaused = isPaused,
+                            rangeSuffix = highGRange,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -1774,6 +1780,7 @@ fun BleAppScreen(
                             points = chartData.lowG,
                             timeWindowSec = timeWindowSec,
                             isPaused = isPaused,
+                            rangeSuffix = lowGRange,
                             modifier = Modifier.weight(1f),
                         )
                         SensorChart(
@@ -1781,6 +1788,7 @@ fun BleAppScreen(
                             points = chartData.gyro,
                             timeWindowSec = timeWindowSec,
                             isPaused = isPaused,
+                            rangeSuffix = gyroRange,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -2556,6 +2564,7 @@ private fun SensorChart(
     timeWindowSec: Float,
     isPaused: Boolean,
     modifier: Modifier = Modifier,
+    rangeSuffix: String? = null,
 ) {
     var cursor1 by remember(isPaused) { mutableStateOf<Entry?>(null) }
     var cursor2 by remember(isPaused) { mutableStateOf<Entry?>(null) }
@@ -2723,6 +2732,7 @@ private fun SensorChart(
                             textColor = android.graphics.Color.WHITE
                             setDrawGridLines(true)
                             gridColor = android.graphics.Color.parseColor("#333333")
+                            setDrawLimitLinesBehindData(false)
                         }
                         axisRight.isEnabled = false
                         legend.isEnabled = false
@@ -2801,10 +2811,49 @@ private fun SensorChart(
                         }
                     }
 
+                    val rangeLimit = RangeLimitResolver.resolve(title, rangeSuffix)
+
                     if (rawMinY != Float.MAX_VALUE && rawMaxY != -Float.MAX_VALUE) {
-                        val (smoothMin, smoothMax) = yScaler.update(rawMinY, rawMaxY, immediate = isPaused)
+                        var (smoothMin, smoothMax) = yScaler.update(rawMinY, rawMaxY, immediate = isPaused)
+                        if (rangeLimit != null) {
+                            if (rawMaxY >= rangeLimit.limitValue * 0.90f) {
+                                smoothMax = maxOf(smoothMax, rangeLimit.limitValue * 1.06f)
+                            }
+                            if (rawMinY <= -rangeLimit.limitValue * 0.90f) {
+                                smoothMin = minOf(smoothMin, -rangeLimit.limitValue * 1.06f)
+                            }
+                        }
                         chart.axisLeft.axisMinimum = smoothMin
                         chart.axisLeft.axisMaximum = smoothMax
+                    }
+
+                    chart.axisLeft.removeAllLimitLines()
+                    if (rangeLimit != null) {
+                        val isSaturatedHigh = rawMaxY >= rangeLimit.limitValue * 0.99f
+                        val isSaturatedLow = rawMinY <= -rangeLimit.limitValue * 0.99f
+
+                        val posText = if (isSaturatedHigh) "${rangeLimit.posLabel} (Saturated)" else rangeLimit.posLabel
+                        val posLimit = LimitLine(rangeLimit.limitValue, posText).apply {
+                            lineColor = if (isSaturatedHigh) android.graphics.Color.parseColor("#FF1744") else android.graphics.Color.parseColor("#FF7043")
+                            lineWidth = if (isSaturatedHigh) 2.0f else 1.5f
+                            enableDashedLine(12f, 8f, 0f)
+                            textColor = if (isSaturatedHigh) android.graphics.Color.parseColor("#FF1744") else android.graphics.Color.parseColor("#FFAB40")
+                            textSize = 9f
+                            labelPosition = LimitLine.LimitLabelPosition.RIGHT_TOP
+                        }
+
+                        val negText = if (isSaturatedLow) "${rangeLimit.negLabel} (Saturated)" else rangeLimit.negLabel
+                        val negLimit = LimitLine(-rangeLimit.limitValue, negText).apply {
+                            lineColor = if (isSaturatedLow) android.graphics.Color.parseColor("#FF1744") else android.graphics.Color.parseColor("#FF7043")
+                            lineWidth = if (isSaturatedLow) 2.0f else 1.5f
+                            enableDashedLine(12f, 8f, 0f)
+                            textColor = if (isSaturatedLow) android.graphics.Color.parseColor("#FF1744") else android.graphics.Color.parseColor("#FFAB40")
+                            textSize = 9f
+                            labelPosition = LimitLine.LimitLabelPosition.RIGHT_BOTTOM
+                        }
+
+                        chart.axisLeft.addLimitLine(posLimit)
+                        chart.axisLeft.addLimitLine(negLimit)
                     }
 
                     val data = LineData(dataSets.map { it as ILineDataSet })
