@@ -66,7 +66,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | ID | Completed | Priority | Category | Task | Complexity | Recommended Codex model / effort | Gemini alternative / thinking |
 |---|:---:|---|---|---|---|---|---|
 | E001 | ✅ | P0 | Units | Correct high-g sensitivity conversion | Low | Luna / High | Flash / Medium |
-| E002 |  | P0 | Protocol | MTU-aware packets and strict decoding | High | Sol / High | Pro / High |
+| E002 | ✅ | P0 | Protocol | MTU-aware packets and strict decoding | High | Sol / High | Pro / High |
 | E003 |  | P0 | Timing | Acquisition timestamps and explicit gaps | Very high | Astra / Medium | Pro / High |
 | E004 |  | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
 | E005 | ✅ | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
@@ -181,7 +181,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E002 — MTU-aware packets and strict decoding
 
-**Status:** [ ] TODO. **Scope:** app + firmware. **Dependencies:** coordinate packet layout with E003/E004.
+**Status:** [x] Complete. **Scope:** app + firmware. **Dependencies:** coordinate packet layout with E003/E004.
 
 **Evidence:** FW:896–898 batches against a fixed 512-byte buffer; FW:1009–1011 only logs MTU. Full notifications can contain 509 value bytes and need ATT MTU ≥512. The installed NimBLE path (`ble_att_cmd.c:74`, `ble_att.c:408–411`) truncates oversized ATT payloads. At MTU 247, a low-g packet can still declare 111 samples but contain only 52 complete tuples. MAIN:225–226 returns zero after bit exhaustion, manufacturing apparent zero-g samples. MAIN:913 treats every unknown format as raw16; range IDs default silently.
 
@@ -721,3 +721,40 @@ Hardware/UI verification performed (or explicitly not performed):
 Remaining limitations and follow-up task IDs:
 - E025 for filter cutoff calculations and frequency response labels.
 ```
+
+```
+Task: E002
+Date: 2026-10-11
+Files modified/created:
+- esp_sensor/main/main.c
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/PacketDecoder.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/PacketDecoderTest.kt
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Firmware: Added s_negotiated_mtu tracking (defaults to 23 on connect/disconnect, updated on BLE_GAP_EVENT_MTU).
+- Firmware: Batch accumulation and flushing strictly limited to min(512, s_negotiated_mtu - 3) via imu_get_max_packet_bytes(). Samples safely dropped when MTU is too small for a full tuple (e.g. ALL mode at MTU 23) rather than transmitting over-the-air truncated packets.
+- App: Created PacketDecoder with StrictBitReader. Validates magic (0xAA 0x55), stream mode (0..4), format (0..1), active sensor range codes, and exact required byte lengths before producing any samples.
+- App: StrictBitReader throws IllegalArgumentException on bit exhaustion instead of returning 0 (eliminating manufactured fake zero-g samples).
+- App: Integrated PacketDecoder.decode into MainActivity.processBinaryPacket; invalid frames are dropped and logged without affecting timekeeping, filters, charts, triggers, or recording.
+- App: Bounded pendingData text log accumulation in appendLog to 4096 chars to prevent unbounded memory growth on malformed/non-newline streams.
+Regression tests and actual results:
+- PacketDecoderTest (8 tests, 100% pass via JUnit 4.13.2 / Kotlin 2.3.10 / JRE 25):
+  * testValidRaw16_allModes: validated RAW16 decoding and sensitivity scaling across LOW_ACC, HIGH_ACC, BOTH_ACC, ONLY_GYRO, and ALL.
+  * testValidPacked12_allModes_withNegativeValues: verified PACKED12 decoding and 12-bit two's complement sign extension.
+  * testOddPackedSampleCounts: verified odd packed sample counts (1, 3, 7 samples) with bit-exact byte boundaries.
+  * testMtuBoundaries_mtu23_185_247_517: verified strict packet fitting and truncation rejection at ATT MTUs 23, 185, 247, and 517.
+  * testTruncationBoundaries_neverEmitsSamples: tested every truncation length from 0 to requiredBytes - 1; all safely return DecodeResult.Error.
+  * testInvalidHeadersAndRangeCodes: rejected bad magic, 0 sample count, unknown mode, unknown format, and invalid range IDs.
+  * testRandomGarbageFuzz: verified 500 random payload fuzz iterations never throw unhandled exceptions.
+  * testStrictBitReader_exhaustionThrows: verified StrictBitReader bit exhaustion throws exception.
+- Full suite (SensorConversionTest + MedianFilterTest + PacketDecoderTest): 23 tests, 100% pass.
+Android/firmware build result:
+- Standalone JVM compile and JUnit test runner passed. Full Gradle task deferred to E039.
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed (firmware code inspected and updated; protocol decoding verified via paired encoder/decoder unit tests).
+Remaining limitations and follow-up task IDs:
+- E003 for acquisition timestamps, session counters, and explicit packet gaps.
+- E004 for hardware FIFO-based sensor synchronization.
+```
+

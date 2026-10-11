@@ -179,32 +179,6 @@ val gyroOdrOptions = listOf(
     OdrOption("7680 Hz", "7680hz"),
 )
 
-/**
- * MSB-first bit reader used to unpack the 12-bit packed sample stream.
- * `startBit` lets it skip the fixed 9-byte packet header.
- */
-private class BitReader(private val data: ByteArray, startBit: Int = 0) {
-    var bitPos = startBit
-        private set
-
-    fun readBits(n: Int): Int {
-        if (bitPos + n > data.size * 8) return 0 // malformed packet guard
-        var v = 0
-        for (i in 0 until n) {
-            val byte = data[bitPos shr 3].toInt() and 0xFF
-            val bit = (byte ushr (7 - (bitPos and 7))) and 1
-            v = (v shl 1) or bit
-            bitPos++
-        }
-        return v
-    }
-
-    /** Reads 12 bits and sign-extends them to a signed Int. */
-    fun readSigned12(): Int {
-        val v = readBits(12)
-        return if (v and 0x800 != 0) v - 0x1000 else v
-    }
-}
 
 @SuppressLint("MissingPermission")
 class BleViewModel : ViewModel() {

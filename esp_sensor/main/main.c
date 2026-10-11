@@ -137,6 +137,20 @@ typedef struct __attribute__((packed)) {
 } imu_binary_header_t;
 
 /* Local FIFO / batch accumulation buffer */
+#define BLE_ATT_MTU_DEFAULT 23
+static volatile uint16_t s_negotiated_mtu = BLE_ATT_MTU_DEFAULT;
+
+static inline uint16_t imu_get_max_packet_bytes(void)
+{
+    uint16_t mtu = s_negotiated_mtu;
+    /* ATT notification value cannot exceed (ATT_MTU - 3) */
+    uint16_t att_val_max = (mtu > 3) ? (uint16_t)(mtu - 3) : 0;
+    if (att_val_max > BINARY_PACKET_MAX_BYTES) {
+        att_val_max = BINARY_PACKET_MAX_BYTES;
+    }
+    return att_val_max;
+}
+
 static uint8_t  s_batch_buf[BINARY_PACKET_MAX_BYTES];
 static uint8_t  s_batch_sample_count = 0;
 static uint8_t  s_batch_seq = 0;
@@ -852,6 +866,19 @@ static void imu_flush_batch(void)
     }
 
     const uint8_t samples_to_send = s_batch_sample_count;
+    const uint16_t max_packet_bytes = imu_get_max_packet_bytes();
+    /* Bits are already packed; payload length = ceil(bitpos / 8). */
+    uint16_t total_len = (uint16_t)sizeof(imu_binary_header_t) + (uint16_t)((s_batch_bitpos + 7) / 8);
+
+    if (total_len > max_packet_bytes) {
+        /* Discard batch to prevent over-the-air payload truncation */
+        ESP_LOGW(TAG_BLE, "Batch total_len %u > max_packet_bytes %u, dropping batch", total_len, max_packet_bytes);
+        s_dropped_sample_count += samples_to_send;
+        s_batch_sample_count = 0;
+        s_batch_bitpos = 0;
+        return;
+    }
+
     if (s_notify_in_flight >= MAX_BLE_NOTIFY_IN_FLIGHT) {
         s_dropped_sample_count += samples_to_send;
         s_batch_sample_count = 0;
@@ -869,9 +896,6 @@ static void imu_flush_batch(void)
     hdr->gy_fs        = (uint8_t)g_gy_fs;
     hdr->seq          = s_batch_seq++;
     hdr->fmt          = BINARY_FMT_12BIT;
-
-    /* Bits are already packed; payload length = ceil(bitpos / 8). */
-    uint16_t total_len = sizeof(imu_binary_header_t) + (uint16_t)((s_batch_bitpos + 7) / 8);
 
     if (!imu_notify_bytes(s_batch_buf, total_len)) {
         s_dropped_sample_count += samples_to_send;
@@ -893,9 +917,22 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
     default:                   axes = 3; break;
     }
 
-    const uint16_t payload_bits     = (BINARY_PACKET_MAX_BYTES - sizeof(imu_binary_header_t)) * 8;
+    const uint16_t max_packet_bytes = imu_get_max_packet_bytes();
+    if (max_packet_bytes <= sizeof(imu_binary_header_t)) {
+        s_dropped_sample_count++;
+        return;
+    }
+
+    const uint16_t payload_bytes    = max_packet_bytes - (uint16_t)sizeof(imu_binary_header_t);
+    const uint16_t payload_bits     = payload_bytes * 8;
     const uint16_t bits_per_sample  = (uint16_t)axes * PACKED_BITS_PER_AXIS;
     const uint16_t max_samples      = payload_bits / bits_per_sample;
+
+    if (max_samples == 0) {
+        /* Not enough capacity for even one full sample tuple in this mode under current MTU */
+        s_dropped_sample_count++;
+        return;
+    }
 
     if (s_batch_sample_count == 0) {
         /* Start a fresh batch: clear payload bits and reset the bit cursor. */
@@ -956,6 +993,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             ble_conn_handle = event->connect.conn_handle;
+            s_negotiated_mtu = BLE_ATT_MTU_DEFAULT;
             ESP_LOGI(TAG_BLE, "Connected  (conn_handle=%d)", ble_conn_handle);
             /* Request a large MTU and the fastest practical LE link. The phone
              * may reject any preference; streaming continues with negotiated values. */
@@ -982,6 +1020,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                      event->connect.status);
             ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
             ble_notify_enabled = false;
+            s_negotiated_mtu   = BLE_ATT_MTU_DEFAULT;
             xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
             ble_start_advertising();
         }
@@ -992,6 +1031,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                  event->disconnect.reason);
         ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
         ble_notify_enabled = false;
+        s_negotiated_mtu   = BLE_ATT_MTU_DEFAULT;
         s_batch_sample_count = 0;
         s_notify_in_flight = 0;
         xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
@@ -1008,6 +1048,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG_BLE, "MTU negotiated: %d bytes", event->mtu.value);
+        s_negotiated_mtu = event->mtu.value;
         break;
 
     case BLE_GAP_EVENT_NOTIFY_TX:
