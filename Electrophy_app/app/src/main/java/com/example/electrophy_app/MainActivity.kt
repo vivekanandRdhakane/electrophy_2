@@ -89,46 +89,11 @@ val TX_CHAR_UUID: UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E") // Write (App -> ESP)
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
-enum class ConnectionState { Disconnected, Scanning, Connecting, Connected }
-
-enum class GraphMode(val label: String, val command: String) {
-    LOW_G("Low-G Accel", "low_acc"),
-    HIGH_G("High-G Accel", "high_acc"),
-    BOTH_ACC("Both Accel", "both_acc"),
-    GYRO("Gyro", "only_gyro"),
-    ALL("All Sensors", "all"),
-}
-
 private const val MAX_CHART_POINTS = 1500
 private const val SAMPLE_RATE_UPDATE_INTERVAL_MS = 2_000L
 private const val PREFERRED_BLE_MTU = 517
 private const val BLE_TAG = "ElectrophyBLE"
 
-data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
-
-data class ChartData(
-    val lowG: List<AxisPoint> = emptyList(),
-    val highG: List<AxisPoint> = emptyList(),
-    val gyro: List<AxisPoint> = emptyList(),
-)
-
-data class AirplaneAttitude(
-    val pitchDeg: Float = 0f,
-    val rollDeg: Float = 0f,
-    val yawDeg: Float = 0f,
-    val gForce: Float = 1f,
-    val turnRateDps: Float = 0f
-)
-
-data class CalibrationOffsets(
-    val accelX: Float = 0f, // in mg
-    val accelY: Float = 0f, // in mg
-    val accelZ: Float = 0f, // in mg (deviation from ideal 1000mg)
-    val gyroX: Float = 0f,  // in mdps
-    val gyroY: Float = 0f,  // in mdps
-    val gyroZ: Float = 0f,  // in mdps
-    val isCalibrated: Boolean = false
-)
 
 data class OdrOption(val label: String, val suffix: String)
 

@@ -628,7 +628,7 @@ object MathEngine {
         filterType: FilterLabType,
         alphaLow: Float = 0.15f,
         alphaHigh: Float = 0.05f,
-        windowSize: Int = 10
+        windowSize: Int = 11
     ): List<ScalarPoint> {
         if (points.isEmpty()) return emptyList()
         return when (filterType) {
@@ -677,8 +677,22 @@ object MathEngine {
         return out
     }
 
-    private fun applyMedianFilter(points: List<ScalarPoint>, windowSize: Int): List<ScalarPoint> {
-        val w = windowSize.coerceIn(3, 51)
+    /**
+     * Normalizes a requested median window size to a centered odd integer in [3, 51].
+     * Even window sizes are rounded up to the nearest odd integer (e.g. 12 -> 13).
+     */
+    fun normalizeMedianWindow(windowSize: Int): Int {
+        val coerced = windowSize.coerceIn(3, 51)
+        return if (coerced % 2 == 0) {
+            (coerced + 1).coerceAtMost(51)
+        } else {
+            coerced
+        }
+    }
+
+    internal fun applyMedianFilter(points: List<ScalarPoint>, windowSize: Int): List<ScalarPoint> {
+        if (points.isEmpty()) return emptyList()
+        val w = normalizeMedianWindow(windowSize)
         val half = w / 2
         val out = ArrayList<ScalarPoint>(points.size)
         val scratch = FloatArray(w)
@@ -690,7 +704,11 @@ object MathEngine {
                 scratch[j] = points[start + j].value
             }
             scratch.sort(0, len)
-            val median = scratch[len / 2]
+            val median = if (len % 2 == 1) {
+                scratch[len / 2]
+            } else {
+                (scratch[len / 2 - 1] + scratch[len / 2]) / 2f
+            }
             out.add(ScalarPoint(points[i].timeMs, median))
         }
         return out

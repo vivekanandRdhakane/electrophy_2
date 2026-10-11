@@ -69,7 +69,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E002 |  | P0 | Protocol | MTU-aware packets and strict decoding | High | Sol / High | Pro / High |
 | E003 |  | P0 | Timing | Acquisition timestamps and explicit gaps | Very high | Astra / Medium | Pro / High |
 | E004 |  | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
-| E005 |  | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
+| E005 | ✅ | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
 | E006 |  | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
 | E007 |  | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
 | E008 |  | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
@@ -213,7 +213,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E005 — Fix median-filter crash
 
-**Status:** [ ] TODO. **Scope:** math engine + control. **Dependencies:** none.
+**Status:** [x] Complete. **Scope:** math engine + control. **Dependencies:** none.
 
 **Evidence:** MATH:680–695 allocates `FloatArray(w)` but fills `2*(w/2)+1` interior entries. MATHUI:68 defaults to window **12**. Selecting MEDIAN with ordinary data throws `ArrayIndexOutOfBoundsException: Index 12 out of bounds for length 12` in an actual compiled-engine probe.
 
@@ -685,4 +685,39 @@ Hardware/UI verification performed (or explicitly not performed):
 - Explicitly not performed (pure mathematical conversion & protocol parsing task).
 Remaining limitations and follow-up task IDs:
 - E002/E003 needed for packet framing, MTU sizing, and hardware timekeeping.
+```
+
+```text
+Task: E005
+Status: Complete
+Changed files:
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/DataModels.kt (created pure domain models)
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MathEngine.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MathVisualization.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/MedianFilterTest.kt (created)
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Added normalizeMedianWindow in MathEngine to normalize requested median window sizes to centered odd integers in [3, 51] (e.g. 12 -> 13).
+- Fixed scratch array allocation and boundary bounds in applyMedianFilter so writing 2*(w/2)+1 elements never overflows the buffer.
+- Added deliberate mathematical median handling for clipped boundary windows: odd population returns exact middle element; even population averages the two middle elements.
+- Updated MathVisualization default filterLabWindow from 12 to 11.
+- Updated MathVisualization slider UI to display the effective odd window size for Median mode so UI labels and engine state agree.
+Regression tests and actual results:
+- MedianFilterTest (8 tests, 100% pass via JUnit 4.13.2 / Kotlin 2.3.10 / JRE 25):
+  * evenWindowSize_doesNotCrash_reproducesAuditProbe: windowSize=12 with 15 samples runs without crash, produces correct median 8.0.
+  * everySelectableWindowSize_runsWithoutCrash: tested sizes 1 through 65 across small and large signals.
+  * emptyAndShortInput_handledSafely: empty list, 1 sample, and 2 samples handled without crash.
+  * largerThanInputWindows_handledSafely: window 31 on 3 samples handled correctly.
+  * constantSignal_preservesValues: verified constant signal preservation.
+  * rampSignal_computesExpectedMedians: linear ramp verified on interior and averaged edge medians.
+  * isolatedImpulse_isCompletelyRejected: single 100g impulse completely rejected to 0.0g.
+  * windowNormalization_effectiveSizeAgreement: verified normalization across full range.
+- Full suite (SensorConversionTest + MedianFilterTest): 15 tests, 100% pass.
+Android/firmware build result:
+- Standalone JVM compile and JUnit test runner passed. Full Gradle task deferred to E039.
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed (pure mathematical algorithm and UI control alignment).
+Remaining limitations and follow-up task IDs:
+- E025 for filter cutoff calculations and frequency response labels.
 ```

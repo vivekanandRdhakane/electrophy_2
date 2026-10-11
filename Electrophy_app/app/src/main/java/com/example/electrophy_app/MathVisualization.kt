@@ -65,7 +65,7 @@ data class MathUiState(
     val filterLabType: FilterLabType = FilterLabType.LOW_PASS,
     val filterLabAlphaLow: Float = 0.15f,
     val filterLabAlphaHigh: Float = 0.05f,
-    val filterLabWindow: Int = 12,
+    val filterLabWindow: Int = 11,
     val showResidualNoise: Boolean = false,
     // Comparator options
     val normalizeComparator: Boolean = true,
@@ -426,13 +426,15 @@ fun MathControlCard(
                                 }
                             }
                             FilterLabType.MOVING_AVG, FilterLabType.MEDIAN -> {
-                                val maxWin = if (state.filterLabType == FilterLabType.MEDIAN) 31f else 80f
+                                val isMedian = state.filterLabType == FilterLabType.MEDIAN
+                                val maxWin = if (isMedian) 31f else 80f
+                                val effectiveWindow = if (isMedian) MathEngine.normalizeMedianWindow(state.filterLabWindow) else state.filterLabWindow
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "Window: ${state.filterLabWindow} pts",
+                                        text = "Window: $effectiveWindow pts",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color(0xFF00E5FF),
                                         modifier = Modifier.width(110.dp)
