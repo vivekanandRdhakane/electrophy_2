@@ -55,49 +55,70 @@ Priority meaning: **P0** silently corrupts foundational measurements; **P1** cra
 
 ## Task index
 
-| ID | Priority | Category | Task |
-|---|---|---|---|
-| E001 | P0 | Units | Correct high-g sensitivity conversion |
-| E002 | P0 | Protocol | MTU-aware packets and strict decoding |
-| E003 | P0 | Timing | Acquisition timestamps and explicit gaps |
-| E004 | P0 | Acquisition | Fresh per-sensor samples and real synchronization |
-| E005 | P1 | Math | Fix median-filter crash |
-| E006 | P1 | Math | Repair comparator lag/correlation |
-| E007 | P1 | Configuration | Atomic applied configuration and valid ODR modes |
-| E008 | P1 | Firmware | Propagate SPI/IMU errors |
-| E009 | P1 | Transport | Correct flow control and loss accounting |
-| E010 | P1 | Android | Reliable BLE lifecycle and operation completion |
-| E011 | P1 | Capture | Separate captures, analysis intervals, and chart history |
-| E012 | P1 | Math | Use actual time and align signals |
-| E013 | P1 | Physics | Correct force, impulse, and SI quantities |
-| E014 | P1 | Physics | Repair vehicle velocity-change experiment |
-| E015 | P1 | Physics | Complete vector-based free-fall events |
-| E016 | P1 | Physics | Measure pendulum swing period correctly |
-| E017 | P1 | Attitude | Coordinate-consistent orientation estimator |
-| E018 | P1 | Attitude | Correct plotted quantity and heading reset |
-| E019 | P1 | Trigger | Typed trigger source and cancellable event lifecycle |
-| E020 | P1 | Calibration | Validate and scope calibration |
-| E021 | P1 | Recording | Reproducible structured recordings and reliable storage |
-| E022 | P1 | Spectra | Correct FFT/STFT bins, amplitudes, and peak validity |
-| E023 | P2 | Integration | Stable integral origins and honest detrending |
-| E024 | P2 | Autocorrelation | Invariant period detection and useful lag range |
-| E025 | P2 | Filters | Correct digital cutoff and response descriptions |
-| E026 | P2 | Statistics | Correct statistical labels and plots |
-| E027 | P2 | Derivative | Source-aware derivatives and accurate stencil labels |
-| E028 | P2 | Physics | Correct the Newton's Third Law claim |
-| E029 | P2 | Physics | Complete centripetal analysis |
-| E030 | P2 | Physics | Complete elevator interpretation |
-| E031 | P2 | Attitude UX | Remove unsupported flight/compass claims |
-| E032 | P2 | Precision | Explicit transport resolution and range policy |
-| E033 | P2 | Performance | Shared background analysis and bounded rendering |
-| E034 | P2 | Charts | Trustworthy sample cursors and interval inspection |
-| E035 | P2 | Navigation | Preserve experiment state and handle system Back |
-| E036 | P2 | Connection UX | Device selection, recovery, and live diagnostics |
-| E037 | P2 | Math UX | Inspectable FFT, spectrogram, and XY plots |
-| E038 | P2 | Accessibility | Responsive controls and accessible plots |
-| E039 | P1 | Validation | Reproducible build and scientific regression suite |
-| E040 | P3 | Expansion | Saved-run browser and offline replay |
-| E041 | P2 | Experiment UX | Guided setup, run, review, and quality feedback |
+Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Google AI Pro** subscriptions. These are my engineering recommendations for the documented task scope, assuming prerequisites are complete; they are **not measured model benchmarks or guaranteed token savings**. Priority measures the consequence of a defect; complexity measures implementation difficulty. Thus E001 is P0 but still a small, well-specified fix.
+
+**Model key:** **Luna** = GPT-6 Luna (`gpt-6-luna`); **Sol** = GPT-6.1 Sol (`gpt-6.1-sol`); **Astra** = GPT-6 Astra (`gpt-6-astra`). Use these in Work/Codex with repository and terminal access. OpenAI recommends Luna for focused tasks and Sol for complex coding at lower cost than Astra; availability depends on account/client rollout. If 6.1 Sol is absent, use the available GPT-6 Sol at the listed starting effort. [Official model guidance](https://learn.chatgpt.com/docs/models).
+
+**Gemini key:** **Flash** and **Pro** mean the corresponding entries in the Gemini model picker, not the Google subscription name. The Gemini alternative is a substitute, not an instruction to run both providers. Google documents Low/Medium/High thinking controls; select them where exposed by your client. If your interface only offers a Pro/Thinking preset, use the corresponding available reasoning model rather than trying to set an unsupported API parameter. [Official Gemini model and thinking controls](https://support.google.com/gemini/answer/18648722?hl=en).
+
+| ID | Priority | Category | Task | Complexity | Recommended Codex model / effort | Gemini alternative / thinking |
+|---|---|---|---|---|---|---|
+| E001 | P0 | Units | Correct high-g sensitivity conversion | Low | Luna / High | Flash / Medium |
+| E002 | P0 | Protocol | MTU-aware packets and strict decoding | High | Sol / High | Pro / High |
+| E003 | P0 | Timing | Acquisition timestamps and explicit gaps | Very high | Astra / Medium | Pro / High |
+| E004 | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
+| E005 | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
+| E006 | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
+| E007 | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
+| E008 | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
+| E009 | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
+| E010 | P1 | Android | Reliable BLE lifecycle and operation completion | High | Sol / High | Pro / High |
+| E011 | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
+| E012 | P1 | Math | Use actual time and align signals | High | Sol / High | Pro / High |
+| E013 | P1 | Physics | Correct force, impulse, and SI quantities | High | Sol / High | Pro / High |
+| E014 | P1 | Physics | Repair vehicle velocity-change experiment | Medium | Sol / Medium | Pro / Medium |
+| E015 | P1 | Physics | Complete vector-based free-fall events | High | Sol / High | Pro / High |
+| E016 | P1 | Physics | Measure pendulum swing period correctly | High | Sol / High | Pro / High |
+| E017 | P1 | Attitude | Coordinate-consistent orientation estimator | Very high | Astra / High | Pro / High |
+| E018 | P1 | Attitude | Correct plotted quantity and heading reset | Medium | Sol / Medium | Flash / Medium |
+| E019 | P1 | Trigger | Typed trigger source and cancellable event lifecycle | High | Sol / High | Pro / High |
+| E020 | P1 | Calibration | Validate and scope calibration | High | Sol / High | Pro / High |
+| E021 | P1 | Recording | Reproducible structured recordings and reliable storage | High | Sol / High | Pro / High |
+| E022 | P1 | Spectra | Correct FFT/STFT bins, amplitudes, and peak validity | High | Sol / High | Pro / High |
+| E023 | P2 | Integration | Stable integral origins and honest detrending | Medium | Sol / Medium | Pro / Medium |
+| E024 | P2 | Autocorrelation | Invariant period detection and useful lag range | Medium | Sol / Medium | Pro / Medium |
+| E025 | P2 | Filters | Correct digital cutoff and response descriptions | Medium | Sol / Medium | Pro / Medium |
+| E026 | P2 | Statistics | Correct statistical labels and plots | Medium | Sol / Medium | Pro / Medium |
+| E027 | P2 | Derivative | Source-aware derivatives and accurate stencil labels | Medium | Sol / Medium | Pro / Medium |
+| E028 | P2 | Physics | Correct the Newton's Third Law claim | Low | Luna / High | Flash / Low |
+| E029 | P2 | Physics | Complete centripetal analysis | Medium | Sol / Medium | Pro / Medium |
+| E030 | P2 | Physics | Complete elevator interpretation | Medium | Sol / Medium | Pro / Medium |
+| E031 | P2 | Attitude UX | Remove unsupported flight/compass claims | Low–medium | Luna / High | Flash / Medium |
+| E032 | P2 | Precision | Explicit transport resolution and range policy | High | Sol / High | Pro / High |
+| E033 | P2 | Performance | Shared background analysis and bounded rendering | High | Sol / High | Pro / High |
+| E034 | P2 | Charts | Trustworthy sample cursors and interval inspection | Medium | Sol / Medium | Flash / Medium |
+| E035 | P2 | Navigation | Preserve experiment state and handle system Back | Medium | Sol / Medium | Pro / Medium |
+| E036 | P2 | Connection UX | Device selection, recovery, and live diagnostics | Medium | Sol / Medium | Pro / Medium |
+| E037 | P2 | Math UX | Inspectable FFT, spectrogram, and XY plots | Medium | Sol / Medium | Flash / Medium |
+| E038 | P2 | Accessibility | Responsive controls and accessible plots | Medium | Sol / Medium | Flash / Medium |
+| E039 | P1 | Validation | Reproducible build and scientific regression suite | High | Sol / High | Pro / High |
+| E040 | P3 | Expansion | Saved-run browser and offline replay | Medium | Sol / Medium | Pro / Medium |
+| E041 | P2 | Experiment UX | Guided setup, run, review, and quality feedback | Medium | Sol / Medium | Flash / Medium |
+
+### Using the recommendations economically
+
+- **Choose one provider per implementation.** Prefer the environment that can read the repository, edit files, and run the required tests. If using Gemini chat without those tools, provide only the relevant files and request a patch; apply and test it locally. A subscription/model name alone does not establish local execution access. Gemini model/feature availability remains subject to the plan and current limits. [Google AI plan limits](https://support.google.com/gemini/answer/16275805).
+- **Do not default to Ultra for one task.** Start at the table's effort. OpenAI's controls differ by model: Luna High is a normal economical starting point, not equivalent in cost to Astra High. Max/Ultra are escalation options rather than this plan's defaults. [Reasoning-effort guidance](https://learn.chatgpt.com/docs/models).
+- **Use smaller scope before more effort.** For E003/E004/E017, ask the recommended model to establish the protocol/estimator contract and tests first, then implement bounded pieces against that contract. Once settled, mechanical follow-up edits can use Sol or Luna. E039 should be split into toolchain setup, regression fixtures, and hardware qualification; no model replaces the physical checks.
+- **Escalate based on evidence.** If a focused attempt plus one correction still fails a meaningful test or keeps changing its design, hand off the failing test, current diff, and short decision summary. Escalate Luna to Sol, Sol Medium to High, or unresolved Sol High architecture work to Astra Medium/High. For Gemini, escalate Flash to Pro or Medium to High. Do not keep retrying a weak approach just because its individual calls are smaller.
+- **Spend a stronger review only where it matters.** After timing/acquisition/configuration work is integrated, a focused review of the shared interfaces, failure paths, and tests is more useful than re-auditing this entire document after each label edit. A successful model review does not replace the acceptance tests.
+- **Read only the selected task and its dependencies.** Ask the agent to locate `### E___`, read the shared contracts and relevant source symbols, and avoid loading all 41 task bodies. Keep a short implementation handoff recording decisions, changed files, and test results. Request a concise final report, not a regenerated audit.
+- **Scope qualifications:** E014 assumes the fixed-mount baseline path and completed data prerequisites; a new general 3D velocity estimator needs a separate High-effort design. E027 assumes accurate labeling of the existing derivative; adding a new validated derivative algorithm merits Sol/Pro High. E028 covers the single-sensor correction, not dual-device support. E031's inexpensive path labels the existing body-Z rate honestly and consumes existing quality state; new heading-rate mathematics or freshness infrastructure belongs to its prerequisite tasks.
+- **Optimize allowance, not just visible response length.** Context, reasoning, tools, and retries affect usage; API token prices are not subscription task quotas. Use Standard speed when minimizing credit spend and check the usage dashboard rather than assuming a fixed number of tasks. No percentage saving is promised. [OpenAI subscription and credit guidance](https://learn.chatgpt.com/docs/pricing).
+
+Suggested economical prompt:
+
+> Implement E005 from `ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md`. Read only its task body, the shared contracts, applicable repository instructions, and necessary source/dependency sections. Keep the change focused; preserve unrelated edits. Run its acceptance tests and report the changed files, actual results, and remaining limitations concisely. Do not implement other task IDs unless an essential prerequisite is identified and its scope is made explicit.
 
 ## Feature-by-feature coverage
 
