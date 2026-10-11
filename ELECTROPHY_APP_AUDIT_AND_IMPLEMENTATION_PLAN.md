@@ -65,7 +65,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 
 | ID | Completed | Priority | Category | Task | Complexity | Recommended Codex model / effort | Gemini alternative / thinking |
 |---|:---:|---|---|---|---|---|---|
-| E001 |  | P0 | Units | Correct high-g sensitivity conversion | Low | Luna / High | Flash / Medium |
+| E001 | ✅ | P0 | Units | Correct high-g sensitivity conversion | Low | Luna / High | Flash / Medium |
 | E002 |  | P0 | Protocol | MTU-aware packets and strict decoding | High | Sol / High | Pro / High |
 | E003 |  | P0 | Timing | Acquisition timestamps and explicit gaps | Very high | Astra / Medium | Pro / High |
 | E004 |  | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
@@ -171,7 +171,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E001 — Correct high-g sensitivity conversion
 
-**Status:** [ ] TODO. **Scope:** app conversion and documentation. **Dependencies:** none.
+**Status:** [x] Complete. **Scope:** app conversion and documentation. **Dependencies:** none.
 
 **Evidence:** MAIN:923–929 uses `0.009765 g/LSB` at ±320 g. ST:86–108 specifies `10.417 mg/LSB`, or `0.010417 g/LSB`. This underreports by about **6.259%**. The 64/128/256 g entries also differ slightly from the official driver. The project skill repeats these errors.
 
@@ -651,4 +651,38 @@ Regression tests and actual results:
 Android/firmware build result:
 Hardware/UI verification performed (or explicitly not performed):
 Remaining limitations and follow-up task IDs:
+```
+
+### Log entries
+
+```text
+Task: E001
+Status: Complete
+Changed files:
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/SensorConversion.kt (created)
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- .agents/skills/electrophy/SKILL.md
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/SensorConversionTest.kt (created)
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Centralized Low-G, High-G, and Gyro sensitivities in pure SensorConversion utility based on official ST LSM6DSV320X register driver constants.
+- Corrected High-G sensitivities to [0.000976, 0.001952, 0.003904, 0.007808, 0.010417] g/LSB (resolving ~6.26% underreporting at ±320g).
+- Preserved legacy packed12 factor of 16.
+- Added explicit rejection and warning logs for unknown/unsupported range IDs.
+- Corrected skill documentation table.
+Regression tests and actual results:
+- SensorConversionTest (7 tests, 100% pass via JUnit 4.13.2 / Kotlin 2.3.10 / JRE 25):
+  * acceptanceCriterion_packedValue600At320gIs100g: code 600 at ±320g packed12 yields 100.0032 g (verified != 93.744 g).
+  * highGSensitivities_matchOfficialSTDriver: all 5 High-G ranges verified.
+  * highGFormats_raw16AndPacked12: verified 16x scaling between raw16 and packed12.
+  * lowGSensitivities_matchOfficialSTDriver: verified all 4 Low-G ranges.
+  * gyroSensitivities_matchOfficialSTDriver: verified all 6 Gyro ranges.
+  * boundaryAndNegativeValues_areSymmetric: verified full signed ranges and negation symmetry.
+  * unknownRangeIDs_areRejected: verified rejection of invalid range codes.
+Android/firmware build result:
+- Standalone JVM compile and JUnit test runner passed. Full Gradle task deferred to E039.
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed (pure mathematical conversion & protocol parsing task).
+Remaining limitations and follow-up task IDs:
+- E002/E003 needed for packet framing, MTU sizing, and hardware timekeeping.
 ```

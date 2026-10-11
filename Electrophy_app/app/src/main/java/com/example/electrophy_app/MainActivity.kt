@@ -912,35 +912,23 @@ class BleViewModel : ViewModel() {
 
         val packed12 = fmt == 1
 
-        // Sensitivity factors (per 16-bit LSB)
-        val xlSens = when (xlFs) {
-            0 -> 0.061f  // ±2g
-            1 -> 0.122f  // ±4g
-            2 -> 0.244f  // ±8g
-            3 -> 0.488f  // ±16g
-            else -> 0.061f
-        }
-        val hgSens = when (hgFs) {
-            0 -> 0.000976f // ±32g (in g)
-            1 -> 0.001953f // ±64g
-            2 -> 0.003906f // ±128g
-            3 -> 0.007812f // ±256g
-            4 -> 0.009765f // ±320g
-            else -> 0.009765f
-        }
-        val gySens = when (gyFs) {
-            1 -> 8.75f   // ±250dps (in mdps)
-            2 -> 17.50f  // ±500dps
-            3 -> 35.0f   // ±1000dps
-            4 -> 70.0f   // ±2000dps
-            5 -> 140.0f  // ±4000dps
-            else -> 70.0f
+        // Sensitivity factors centralized in SensorConversion (per ST driver)
+        val rawXlScale = SensorConversion.getLowGScale(xlFs, packed12)
+        val rawHgScale = SensorConversion.getHighGScale(hgFs, packed12)
+        val rawGyScale = SensorConversion.getGyroScale(gyFs, packed12)
+
+        // Reject packets with unknown range codes for active sensors
+        when (mode) {
+            1 -> if (rawXlScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown xlFs=$xlFs, dropping frame"); return }
+            2 -> if (rawHgScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown hgFs=$hgFs, dropping frame"); return }
+            3 -> if (rawXlScale == null || rawHgScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown xlFs=$xlFs or hgFs=$hgFs, dropping frame"); return }
+            4 -> if (rawGyScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown gyFs=$gyFs, dropping frame"); return }
+            0 -> if (rawXlScale == null || rawHgScale == null || rawGyScale == null) { Log.w(BLE_TAG, "processBinaryPacket: unknown range code in ALL mode, dropping frame"); return }
         }
 
-        // 12-bit packed values were produced by raw >> 4, so scale by sens * 16.
-        val xlScale = if (packed12) xlSens * 16f else xlSens
-        val hgScale = if (packed12) hgSens * 16f else hgSens
-        val gyScale = if (packed12) gySens * 16f else gySens
+        val xlScale = rawXlScale ?: 0f
+        val hgScale = rawHgScale ?: 0f
+        val gyScale = rawGyScale ?: 0f
 
         val lowGList = mutableListOf<AxisPoint>()
         val highGList = mutableListOf<AxisPoint>()

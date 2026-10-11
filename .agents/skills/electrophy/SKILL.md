@@ -245,10 +245,10 @@ Where V₁₂ is extracted by `BitReader.readSigned12()` and sensitivities are:
 | Low-G   | ±8g       | 0.244 mg/LSB     |
 | Low-G   | ±16g      | 0.488 mg/LSB     |
 | High-G  | ±32g      | 0.000976 g/LSB   |
-| High-G  | ±64g      | 0.001953 g/LSB   |
-| High-G  | ±128g     | 0.003906 g/LSB   |
-| High-G  | ±256g     | 0.007812 g/LSB   |
-| High-G  | ±320g     | 0.009765 g/LSB   |
+| High-G  | ±64g      | 0.001952 g/LSB   |
+| High-G  | ±128g     | 0.003904 g/LSB   |
+| High-G  | ±256g     | 0.007808 g/LSB   |
+| High-G  | ±320g     | 0.010417 g/LSB   |
 | Gyro    | ±250 dps  | 8.75 mdps/LSB    |
 | Gyro    | ±500 dps  | 17.50 mdps/LSB   |
 | Gyro    | ±1000 dps | 35.0 mdps/LSB    |
