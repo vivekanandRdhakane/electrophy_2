@@ -15,7 +15,10 @@ remain active. This switch does not change the ESP-IDF Bluetooth sdkconfig.
 
 - GPIO21 (ESP32-C3 package pin 28 / U0TXD) drives TPS27081 POWER_HOLD high
   from the second-stage bootloader's before-init hook and stays high in the app.
-- GPIO8 (package pin 14) drives the LED cathode: low is ON. Standby indication
+- GPIO8 (package pin 14) drives the LED cathode: low is ON. After board power
+  initialization, the LED stays steadily on for a three-second startup pause
+  before BLE and the sensor task start, giving the USB monitor time to attach.
+  Standby indication then
   uses 5 kHz PWM with a smooth two-second breathing cycle: one second brighter,
   one second dimmer, starting off. Brightness is updated every 10 ms.
 - Console output uses USB Serial/JTAG (GPIO18/19), freeing GPIO21 from UART TX.

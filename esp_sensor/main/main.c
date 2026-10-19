@@ -1421,6 +1421,20 @@ static void board_power_and_led_init(void)
     };
     ESP_ERROR_CHECK(gpio_config(&power_cfg));
 
+    /* Keep the active-low LED steadily on during the USB startup window. */
+    ESP_ERROR_CHECK(gpio_set_level(PIN_STATUS_LED, 0));
+    const gpio_config_t led_cfg = {
+        .pin_bit_mask = 1ULL << PIN_STATUS_LED,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&led_cfg));
+}
+
+static void status_led_start_breathing(void)
+{
     /* 5 kHz hardware PWM; inverted output because the LED cathode is driven. */
     const ledc_timer_config_t pwm_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
@@ -1455,6 +1469,10 @@ static void board_power_and_led_init(void)
 void app_main(void)
 {
     board_power_and_led_init();
+    /* Yield before starting BLE or the sensor task so USB can enumerate and
+     * a monitor can attach before a possible task failure. */
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    status_led_start_breathing();
     ESP_LOGI(TAG, "=== ESP_IMU starting ===");
 #if USE_BLE
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
