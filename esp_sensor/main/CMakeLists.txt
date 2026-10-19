@@ -7,4 +7,5 @@ idf_component_register(
         bt
         nvs_flash
         esp_driver_spi
-        esp_driver_gpio)
+        esp_driver_gpio
+        esp_driver_ledc)

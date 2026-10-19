@@ -21,19 +21,34 @@
  *                "[mg] X=%7.2f Y=%7.2f Z=%7.2f [mdps] X=%8.2f Y=%8.2f Z=%8.2f"
  */
 
+/* Set to 0 for sensor debugging without BLE; rebuild after changing. */
+#ifndef USE_BLE
+#define USE_BLE 0
+#endif
+#if USE_BLE != 0 && USE_BLE != 1
+#error "USE_BLE must be 0 or 1"
+#endif
+
+#include <stdbool.h>
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 #include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#if USE_BLE
 #include "freertos/event_groups.h"
+#endif
 
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
+#if USE_BLE
 #include "nvs_flash.h"
 
 /* NimBLE */
@@ -43,6 +58,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#endif
 
 #include "lsm6dsv320x_reg.h"
 
@@ -52,10 +68,13 @@
 #define PIN_MOSI    GPIO_NUM_6
 #define PIN_MISO    GPIO_NUM_7
 #define PIN_INT1    GPIO_NUM_10
+#define PIN_POWER_HOLD GPIO_NUM_21  /* Package pin 28 / U0TXD */
+#define PIN_STATUS_LED GPIO_NUM_8   /* Package pin 14, cathode: active low */
 
 #define SPI_HOST_ID SPI2_HOST
 #define SPI_CLK_HZ  (8 * 1000 * 1000)  /* 8 MHz */
 
+#if USE_BLE
 #define DEVICE_NAME       "ESP_IMU"
 
 /* Nordic UART Service (NUS) UUIDs — Standard for BLE Terminal Apps */
@@ -74,10 +93,11 @@ static const ble_uuid128_t nus_rx_chr_uuid =
     BLE_UUID128_INIT(0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
                      0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e);
 
-static const char *TAG     = "LSM6DSV320X";
 static const char *TAG_BLE = "BLE";
+#endif
 
 /* ── Global state ─────────────────────────────────────────────────────────── */
+static const char *TAG = "LSM6DSV320X";
 static spi_device_handle_t spi_handle;
 static TaskHandle_t        sensor_task_handle = NULL;
 
@@ -89,6 +109,7 @@ static SemaphoreHandle_t spi_mutex;
 /* Driver context — file-scope so BLE command handler can reconfigure ODR */
 static stmdev_ctx_t dev_ctx;
 
+#if USE_BLE
 /* BLE connection / subscription state */
 static uint16_t ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t imu_chr_val_handle = 0;
@@ -98,6 +119,7 @@ static uint8_t  own_addr_type      = BLE_OWN_ADDR_RANDOM; /* resolved at sync */
 /* FreeRTOS event group: set when a central is connected */
 #define BLE_CONNECTED_BIT   BIT0
 static EventGroupHandle_t ble_event_group;
+#endif
 
 /* Streaming mode controlled by mobile commands */
 typedef enum {
@@ -109,6 +131,7 @@ typedef enum {
 } stream_mode_t;
 
 static volatile stream_mode_t current_stream_mode = STREAM_MODE_ALL;
+#if USE_BLE
 static volatile bool          g_data_paused       = false;
 
 /* ── Binary Streaming Protocol ───────────────────────────────────────────── */
@@ -161,6 +184,7 @@ static int64_t  s_last_batch_send_time = 0;
 static volatile uint8_t s_notify_in_flight = 0;
 static uint32_t s_dropped_sample_count = 0;
 static int64_t s_last_drop_report_time = 0;
+#endif
 
 /* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
 /* Current output data-rate (Hz) for each sensing path; 0 = power-down.
@@ -489,6 +513,7 @@ static void int1_gpio_init(void)
 }
 
 /* Cache of latest string for GATT Read */
+#if USE_BLE
 static char latest_ble_str[256] = "Sensor initializing...\r\n";
 
 /* ── BLE: GATT characteristic access callback ─────────────────────────────── */
@@ -1172,6 +1197,8 @@ static void ble_stack_init(void)
 }
 
 /* ── Sensor task ──────────────────────────────────────────────────────────── */
+#endif /* USE_BLE */
+
 static void sensor_task(void *arg)
 {
     /* Store own handle so the ISR can send task notifications */
@@ -1235,12 +1262,19 @@ static void sensor_task(void *arg)
     /* Initialise timing and route DRDY to INT1 (GPIO10) based on current stream mode */
     odr_recompute_timing();
 
+#if USE_BLE
     ESP_LOGI(TAG, "Sensor ready (Low-G + High-G + Gyro). Waiting for BLE connection...");
+#else
+    ESP_LOGI(TAG, "Sensor ready. BLE disabled; printing ALL readings once per second.");
+#endif
 
     /* ── Main loop ──────────────────────────────────────────────────────── */
     int16_t data_raw_acceleration[3];
     int16_t data_raw_hg_acceleration[3];
     int16_t data_raw_angular_rate[3];
+#if !USE_BLE
+    int64_t last_console_sample_us = esp_timer_get_time();
+#endif
 
     while (1) {
         /* Feed the task watchdog, but throttle to every 20 ms. A per-iteration
@@ -1254,6 +1288,7 @@ static void sensor_task(void *arg)
         }
 
         /* ── Gate: pause until a BLE central is connected ─────────────── */
+#if USE_BLE
         if (!(xEventGroupGetBits(ble_event_group) & BLE_CONNECTED_BIT)) {
             static bool disconn_logged = false;
             if (!disconn_logged) {
@@ -1284,6 +1319,7 @@ static void sensor_task(void *arg)
             s_batch_sample_count = 0;
             continue;
         }
+#endif
 
         /* ── Wait for INT1 data-ready interrupt ───────────────────────── */
         /* Timeout = 5× the period of the slowest active sensor (dynamic) */
@@ -1302,6 +1338,7 @@ static void sensor_task(void *arg)
             lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
         }
 
+#if USE_BLE
         /* Accumulate raw sample into batch buffer (auto-flushes if full or >= 30 ms) */
         imu_accumulate_sample(data_raw_acceleration, data_raw_hg_acceleration, data_raw_angular_rate);
 
@@ -1328,14 +1365,100 @@ static void sensor_task(void *arg)
                      "ESP_IMU Binary: mode=%d count=%u seq=%u\r\n",
                      current_stream_mode, s_batch_sample_count, s_batch_seq);
         }
+#else
+        /* ALL mode is the default without BLE commands. Keep sampling at the
+         * configured sensor rates and print one snapshot per second. */
+        int64_t now = esp_timer_get_time();
+        if (now - last_console_sample_us >= 1000000LL) {
+            last_console_sample_us = now;
+            /* Conversion scales match the fixed sensor setup above. */
+            ESP_LOGI(TAG,
+                     "ALL Low-G [mg] X=%.2f Y=%.2f Z=%.2f | "
+                     "High-G [mg] X=%.2f Y=%.2f Z=%.2f | "
+                     "Gyro [mdps] X=%.2f Y=%.2f Z=%.2f",
+                     lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[0]),
+                     lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[1]),
+                     lsm6dsv320x_from_fs2_to_mg(data_raw_acceleration[2]),
+                     lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[0]),
+                     lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[1]),
+                     lsm6dsv320x_from_fs320_to_mg(data_raw_hg_acceleration[2]),
+                     lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[0]),
+                     lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[1]),
+                     lsm6dsv320x_from_fs2000_to_mdps(data_raw_angular_rate[2]));
+        }
+#endif
     }
 }
 
 /* ── Entry point ──────────────────────────────────────────────────────────── */
+static int64_t status_led_start_us;
+
+static void status_led_tick(void *arg)
+{
+    (void)arg;
+    /* A cosine envelope gives gentle turnarounds; square it for a more
+     * even perceived brightness change. Use elapsed time to avoid drift. */
+    const int64_t phase_us = (esp_timer_get_time() - status_led_start_us) % 2000000;
+    const float phase = (float)phase_us / 2000000.0f;
+    const float brightness = 0.5f - 0.5f * cosf(6.28318530718f * phase);
+    const uint32_t duty = (uint32_t)(4095.0f * brightness * brightness + 0.5f);
+    /* This timer is the only duty writer. Direct updates do not require
+     * the LEDC fade service (unlike ledc_set_duty_and_update). */
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+}
+
+static void board_power_and_led_init(void)
+{
+    /* Preload HIGH before enabling output; the bootloader already holds it. */
+    ESP_ERROR_CHECK(gpio_set_level(PIN_POWER_HOLD, 1));
+    const gpio_config_t power_cfg = {
+        .pin_bit_mask = 1ULL << PIN_POWER_HOLD,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&power_cfg));
+
+    /* 5 kHz hardware PWM; inverted output because the LED cathode is driven. */
+    const ledc_timer_config_t pwm_timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_12_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 5000,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&pwm_timer));
+    const ledc_channel_config_t pwm_channel = {
+        .gpio_num = PIN_STATUS_LED,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0,
+        .hpoint = 0,
+        .flags.output_invert = 1,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&pwm_channel));
+    /* Standby breathing: one second brighter, one second dimmer. */
+    static esp_timer_handle_t led_timer;
+    const esp_timer_create_args_t timer_args = {
+        .callback = status_led_tick,
+        .name = "status_led",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &led_timer));
+    status_led_start_us = esp_timer_get_time();
+    ESP_ERROR_CHECK(esp_timer_start_periodic(led_timer, 10000));
+}
+
 void app_main(void)
 {
+    board_power_and_led_init();
     ESP_LOGI(TAG, "=== ESP_IMU starting ===");
+#if USE_BLE
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
+#endif
 
     /* The sensor task streams continuously and, at high ODR, keeps the CPU so
      * busy that the IDLE task (the default Task-Watchdog user) never runs,
@@ -1349,7 +1472,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_cfg));
 
     /* Start BLE stack first — it runs in its own NimBLE host task */
+#if USE_BLE
     ble_stack_init();
+#endif
 
     /* Start sensor task — handles SPI + INT1 + BLE notify */
     xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);

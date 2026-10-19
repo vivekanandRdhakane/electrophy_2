@@ -3,6 +3,31 @@
 
 # _Sample project_
 
+## Board power and status LED
+
+For debugging, set `USE_BLE` near the top of `main/main.c` to `0` and rebuild
+and flash. Set it to `1` to enable BLE normally. With `0`, BLE startup, GATT,
+advertising, notifications, and the connection wait are compiled out; IMU
+initialization and sampling continue without a phone. The USB monitor prints one
+`ALL` sample per second: X/Y/Z for Low-G and High-G acceleration in mg and
+gyroscope in mdps. Power hold and the LED
+remain active. This switch does not change the ESP-IDF Bluetooth sdkconfig.
+
+- GPIO21 (ESP32-C3 package pin 28 / U0TXD) drives TPS27081 POWER_HOLD high
+  from the second-stage bootloader's before-init hook and stays high in the app.
+- GPIO8 (package pin 14) drives the LED cathode: low is ON. Standby indication
+  uses 5 kHz PWM with a smooth two-second breathing cycle: one second brighter,
+  one second dimmer, starting off. Brightness is updated every 10 ms.
+- Console output uses USB Serial/JTAG (GPIO18/19), freeing GPIO21 from UART TX.
+  Use the native USB connection for logs.
+
+Build and flash the **whole project**, including the bootloader (`idf.py build
+flash`); an application-only flash will not install the early POWER_HOLD hook.
+The ROM executes before this hook and can emit UART boot messages on GPIO21.
+The hardware power-on path must sustain power until the hook runs; firmware
+cannot guarantee a continuously high pin starting at the instant power is applied.
+Check POWER_HOLD on an oscilloscope during a cold start and button release.
+
 (See the README.md file in the upper level 'examples' directory for more information about examples.)
 
 This is the simplest buildable example. The example is used by command `idf.py create-project`
