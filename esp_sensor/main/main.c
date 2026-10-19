@@ -47,6 +47,7 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_cpu.h"
 #include "esp_task_wdt.h"
 #if USE_BLE
 #include "nvs_flash.h"
@@ -199,6 +200,22 @@ static struct {
     uint32_t coalesced, timeouts, read_errors, retries, notify_errors;
     uint32_t bytes, packets;
 } s_stats;
+/* Optional wall-time profiling; cycle subtraction handles counter wrap.
+ * CPU frequency is fixed in sdkconfig (power management disabled). */
+typedef struct { uint64_t cycles; uint32_t count, max_cycles; } perf_stage_t;
+typedef struct {
+    perf_stage_t lock, read, pack, notify;
+    uint32_t window_us, irq, acquired, coalesced;
+} imu_perf_t;
+static imu_perf_t s_perf, s_perf_snapshot;
+static volatile uint32_t s_irq_count;
+static inline void perf_add(perf_stage_t *stage, uint32_t start)
+{
+    uint32_t elapsed = esp_cpu_get_cycle_count() - start;
+    stage->cycles += elapsed;
+    stage->count++;
+    if (elapsed > stage->max_cycles) stage->max_cycles = elapsed;
+}
 static void imu_discard_pending(void);
 static void imu_drain_tx(void);
 
@@ -207,6 +224,8 @@ static void imu_drain_tx(void);
 /* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
 /* Current output data-rate (Hz) for each sensing path; 0 = power-down.
  * Initialised to match the startup configuration below. */
+static int8_t s_freq_fine;
+static bool s_freq_fine_valid;
 static volatile float g_xl_odr_hz  = 15.0f;   /* Low-G  accel  — CTRL1  */
 static volatile float g_gy_odr_hz  = 15.0f;   /* Gyro          — CTRL2  */
 static volatile float g_hg_odr_hz  = 480.0f;  /* High-G accel  — CTRL1_XL_HG */
@@ -375,6 +394,11 @@ static void odr_recompute_timing(void)
     ESP_LOGI("ODR", "Timing updated: mode=%d active_odr=%.3f Hz  sample_period=%lld µs  drdy_timeout=%lu ms",
              current_stream_mode, active_hz, (long long)period_us, (unsigned long)timeout_ms);
 
+    if (s_freq_fine_valid && current_stream_mode == STREAM_MODE_LOW_ACC && active_hz >= 7.5f) {
+        ESP_LOGI("ODR", "Low-G normal-mode factory estimate=%.2f Hz (FREQ_FINE=%d)",
+                 active_hz * (1.0f + 0.0013f * s_freq_fine), s_freq_fine);
+    }
+
     /* Update hardware INT1 interrupt routing */
     update_int_routing();
 
@@ -383,6 +407,9 @@ static void odr_recompute_timing(void)
 /* ── INT1 ISR ─────────────────────────────────────────────────────────────── */
 static void IRAM_ATTR int1_isr_handler(void *arg)
 {
+#if USE_BLE
+    if (s_diagnostics_enabled) s_irq_count++;
+#endif
     BaseType_t higher_prio_woken = pdFALSE;
     vTaskNotifyGiveFromISR(sensor_task_handle, &higher_prio_woken);
     portYIELD_FROM_ISR(higher_prio_woken);
@@ -865,9 +892,12 @@ static void imu_drain_tx(void)
     }
     /* Accepted notifications have consecutive sequence numbers. */
     ((imu_binary_header_t *)packet->data)->seq = s_batch_seq;
+    bool profile = s_diagnostics_enabled;
+    uint32_t notify_start = profile ? esp_cpu_get_cycle_count() : 0;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(packet->data, packet->len);
     int rc = om ? ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om)
                 : BLE_HS_ENOMEM;
+    if (profile) perf_add(&s_perf.notify, notify_start);
     /* notify_custom consumes the mbuf on success AND failure. */
     if (rc == BLE_HS_ENOMEM || rc == BLE_HS_EAGAIN || rc == BLE_HS_EBUSY) {
         s_stats.retries++;
@@ -1206,8 +1236,33 @@ static void diag_u16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 static void imu_publish_diagnostics(int64_t now_us)
 {
     static int64_t last_snapshot_us;
-    if (!s_diagnostics_enabled || now_us - last_snapshot_us < 1000000LL) return;
+    static uint32_t last_irq, last_acquired, last_coalesced, generation;
+    static bool was_enabled;
+    bool enabled = s_diagnostics_enabled;
+    if (!enabled && !was_enabled) return;
+    if (!enabled || !was_enabled || generation != s_stream_generation) {
+        memset(&s_perf, 0, sizeof(s_perf));
+        last_snapshot_us = now_us;
+        last_irq = s_irq_count;
+        last_acquired = s_stats.acquired;
+        last_coalesced = s_stats.coalesced;
+        generation = s_stream_generation;
+        was_enabled = enabled;
+        vTaskSuspendAll();
+        memset(&s_perf_snapshot, 0, sizeof(s_perf_snapshot));
+        xTaskResumeAll();
+        return;
+    }
+    if (now_us - last_snapshot_us < 1000000LL) return;
+    uint32_t irq = s_irq_count;
+    s_perf.window_us = (uint32_t)(now_us - last_snapshot_us);
+    s_perf.irq = irq - last_irq;
+    s_perf.acquired = s_stats.acquired - last_acquired;
+    s_perf.coalesced = s_stats.coalesced - last_coalesced;
     last_snapshot_us = now_us;
+    last_irq = irq;
+    last_acquired = s_stats.acquired;
+    last_coalesced = s_stats.coalesced;
     uint8_t data[72] = {0xaa, 0x56, 1, current_stream_mode};
     diag_u32(data + 4, (uint32_t)(now_us / 1000));
     diag_u32(data + 8, s_stats.acquired);
@@ -1229,7 +1284,22 @@ static void imu_publish_diagnostics(int64_t now_us)
      * enqueue/pop, so acquisition and transport counters can be compared. */
     vTaskSuspendAll();
     memcpy(s_diagnostics_snapshot, data, sizeof(data));
+    s_perf_snapshot = s_perf;
     xTaskResumeAll();
+    memset(&s_perf, 0, sizeof(s_perf));
+}
+
+static double perf_avg_us(perf_stage_t stage)
+{
+    return stage.count ? (double)stage.cycles / stage.count / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ : 0;
+}
+static double perf_max_us(perf_stage_t stage)
+{
+    return (double)stage.max_cycles / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+}
+static uint32_t diag_read_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
 static void ble_diagnostics_tick(struct ble_npl_event *event)
@@ -1249,8 +1319,10 @@ static void ble_diagnostics_tick(struct ble_npl_event *event)
         if (ble_gap_conn_find(ble_conn_handle, &desc) == 0) s_link_interval = desc.conn_itvl;
         if (!s_link_tx_phy) ble_gap_read_le_phy(ble_conn_handle, &s_link_tx_phy, &s_link_rx_phy);
         uint8_t data[72];
+        imu_perf_t perf;
         vTaskSuspendAll();
         memcpy(data, s_diagnostics_snapshot, sizeof(data));
+        perf = s_perf_snapshot;
         xTaskResumeAll();
         diag_u16(data + 60, os_msys_num_free());
         diag_u16(data + 62, s_negotiated_mtu);
@@ -1266,12 +1338,25 @@ static void ble_diagnostics_tick(struct ble_npl_event *event)
         }
         snprintf(latest_ble_str, sizeof(latest_ble_str),
                  "acquired=%lu submitted=%lu overflow=%lu coalesced=%lu retries=%lu pending=%lu",
-                 (unsigned long)s_stats.acquired, (unsigned long)s_stats.submitted,
-                 (unsigned long)s_stats.overflow, (unsigned long)s_stats.coalesced,
-                 (unsigned long)s_stats.retries, (unsigned long)s_tx_queue.samples);
+                 (unsigned long)diag_read_u32(data + 8), (unsigned long)diag_read_u32(data + 12),
+                 (unsigned long)diag_read_u32(data + 16), (unsigned long)diag_read_u32(data + 24),
+                 (unsigned long)diag_read_u32(data + 36), (unsigned long)diag_read_u32(data + 52));
         ESP_LOGI("STREAM", "%s RSSI=%d MTU=%u interval=%.2fms PHY=%u/%u DLE=%u",
                  latest_ble_str, rssi, s_negotiated_mtu, s_link_interval * 1.25,
                  s_link_tx_phy, s_link_rx_phy, s_link_tx_octets);
+        if (perf.window_us) {
+            double scale = 1000000.0 / perf.window_us;
+            ESP_LOGI("PERF", "window_ms=%lu irq_hz=%.1f acquired_hz=%.1f coalesced_hz=%.1f discarded=%lu read_errors=%lu",
+                     (unsigned long)(perf.window_us / 1000), perf.irq * scale,
+                     perf.acquired * scale, perf.coalesced * scale,
+                     (unsigned long)diag_read_u32(data + 20), (unsigned long)diag_read_u32(data + 32));
+            ESP_LOGI("PERF", "us avg/max: lock=%.2f/%.2f read=%.2f/%.2f pack=%.2f/%.2f notify=%.2f/%.2f attempts=%lu",
+                     perf_avg_us(perf.lock), perf_max_us(perf.lock),
+                     perf_avg_us(perf.read), perf_max_us(perf.read),
+                     perf_avg_us(perf.pack), perf_max_us(perf.pack),
+                     perf_avg_us(perf.notify), perf_max_us(perf.notify),
+                     (unsigned long)perf.notify.count);
+        }
     }
     ble_npl_callout_reset(&s_diagnostics_callout, ble_npl_time_ms_to_ticks32(2000));
 }
@@ -1365,6 +1450,13 @@ static void sensor_task(void *arg)
     lsm6dsv320x_sw_por(&dev_ctx);
     platform_delay(15);
 
+    s_freq_fine_valid = lsm6dsv320x_odr_cal_reg_get(&dev_ctx, &s_freq_fine) == 0;
+    if (s_freq_fine_valid) {
+        ESP_LOGI("ODR", "Factory FREQ_FINE=%d correction=%+.2f%%; normal-mode 7680 estimate=%.2f Hz",
+                 s_freq_fine, s_freq_fine * 0.13, 7680.0 * (1.0 + 0.0013 * s_freq_fine));
+    } else {
+        ESP_LOGW("ODR", "Cannot read factory frequency correction");
+    }
     lsm6dsv320x_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
 
     /* Set Pulsed mode on DRDY pin so it pulses instead of latching indefinitely */
@@ -1461,8 +1553,13 @@ static void sensor_task(void *arg)
 #endif
             continue; /* A timeout is not a new sensor sample. */
         }
+#if USE_BLE
+        bool profile = s_diagnostics_enabled;
+        uint32_t stage_start = profile ? esp_cpu_get_cycle_count() : 0;
+#endif
         xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
 #if USE_BLE
+        if (profile) perf_add(&s_perf.lock, stage_start);
         if (s_sensor_generation != s_stream_generation) {
             imu_discard_pending();
             s_sensor_generation = s_stream_generation;
@@ -1476,6 +1573,9 @@ static void sensor_task(void *arg)
         }
         s_stats.coalesced += ready_count - 1;
 #endif
+#if USE_BLE
+        if (profile) stage_start = esp_cpu_get_cycle_count();
+#endif
         int32_t read_rc = 0;
         if (current_stream_mode == STREAM_MODE_LOW_ACC || current_stream_mode == STREAM_MODE_BOTH_ACC || current_stream_mode == STREAM_MODE_ALL) {
             read_rc |= lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
@@ -1486,6 +1586,9 @@ static void sensor_task(void *arg)
         if (current_stream_mode == STREAM_MODE_ONLY_GYRO || current_stream_mode == STREAM_MODE_ALL) {
             read_rc |= lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
         }
+#if USE_BLE
+        if (profile) perf_add(&s_perf.read, stage_start);
+#endif
         if (read_rc != 0) {
 #if USE_BLE
             s_stats.read_errors++;
@@ -1495,7 +1598,9 @@ static void sensor_task(void *arg)
         }
 #if USE_BLE
         s_stats.acquired++;
+        if (profile) stage_start = esp_cpu_get_cycle_count();
         imu_accumulate_sample(data_raw_acceleration, data_raw_hg_acceleration, data_raw_angular_rate);
+        if (profile) perf_add(&s_perf.pack, stage_start);
         xSemaphoreGiveRecursive(spi_mutex);
         /* Never call NimBLE with the SPI/configuration mutex held. */
         imu_drain_tx();

@@ -111,3 +111,57 @@ time. No buffer-pool tuning or increased radio TX power is applied by this chang
 - Hardware checks: stream at 3840/7680 Hz, enable/disable diagnostics, pause/resume,
   change mode/range, disable notifications, reconnect, and confirm LEDs/power-off.
   Verify actual throughput and drops on both boards before claiming improvement.
+
+
+## Acquisition bottleneck measurements
+
+At boot, `ODR` logs the signed factory `FREQ_FINE` register and its estimated
+normal-mode 7680 Hz rate. Low-G-only ODR changes also log the estimate for the
+selected rate. This is a factory estimate, not a measured interrupt frequency.
+ST specifies `actual = nominal * (1 + 0.0013 * FREQ_FINE)` for the normal ODR
+series (7.5 through 7680 Hz); do not apply this estimate to HAODR modes.
+See [LSM6DSV320X datasheet, section 9.54](https://www.st.com/resource/en/datasheet/lsm6dsv320x.pdf).
+
+With the existing app Stream diagnostics button ON, the USB monitor now also
+prints two `PERF` lines every two seconds. Each report describes the latest
+completed approximately one-second window, not the entire two-second interval:
+
+- `window_ms`: actual measurement duration; rates use that duration.
+- `irq_hz`: GPIO ISR invocations per second. This is not a logic-analyzer count;
+  edges can still be missed while interrupts are masked. Includes interrupts
+  during pause, so compare only steady, unpaused streaming windows.
+- `acquired_hz`: successful sensor reads per second.
+- `coalesced_hz`: extra task notifications consumed without additional reads.
+- `discarded` and `read_errors`: cumulative counters since boot.
+- `lock`, `read`, `pack`, `notify`: average/maximum elapsed microseconds for the
+  configuration/SPI mutex wait, sensor register reads, packing/enqueue, and actual
+  mbuf allocation/notification submission attempts respectively. Notify is per
+  packet attempt; the other stages are per acquisition attempt. `attempts` is
+  the number of notification attempts in that window.
+
+Timings use CPU cycles at the configured fixed 160 MHz (power management OFF).
+They include preemption, so a long SPI read does not by itself prove the SPI bus
+is slow. They exclude the wait for a data-ready notification and do not measure
+RF completion. Profiling adds some overhead while diagnostics are enabled;
+compare the phone receive rate with diagnostics OFF as a control. No per-sample
+logging is added. Windows reset after stream-generation changes and diagnostic
+enable/disable. STREAM counters now use the same completed-operation snapshot
+as the phone packet; pending includes the partial batch as well as queued data.
+
+### Board comparison
+
+1. Flash the rebuilt firmware and capture the boot `Factory FREQ_FINE` line.
+2. Use Low-G only, 7680 Hz, Record OFF, and Stream diagnostics ON.
+3. Wait five seconds after changing settings, then capture ten consecutive
+   STREAM/PERF reports and the phone receive rate. Repeat at 3840 Hz.
+4. Repeat on the development board at the same phone distance/orientation.
+
+If IRQ rate follows the factory estimate but acquisition is lower, investigate
+service delays and notification coalescing. Large notify maxima can delay
+acquisition even with zero retries. If IRQ rate is below the estimate, measure
+physical INT1 pulses with a logic analyzer before attributing the gap to RF.
+If acquisition/submission match but the phone receives fewer samples, investigate
+transport and phone processing. Existing direct-register reads cannot recover
+intermediate samples; the sensor's hardware FIFO is a potential next change once
+these measurements establish the loss point. Firmware does not enable FIFO or
+alter the ODR/PHY/antenna settings in this diagnostic change.

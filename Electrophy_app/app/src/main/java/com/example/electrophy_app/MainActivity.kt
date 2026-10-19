@@ -1760,14 +1760,17 @@ fun BleAppScreen(
                 ) {
                     Text(if (isRecording) "Stop & Export" else "Record")
                 }
-            }
 
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("Stream diagnostics", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                Switch(checked = diagnosticsEnabled,
-                    onCheckedChange = viewModel::setDiagnosticsEnabled,
-                    enabled = connectionState == ConnectionState.Connected)
+                Button(
+                    onClick = { viewModel.setDiagnosticsEnabled(!diagnosticsEnabled) },
+                    enabled = connectionState == ConnectionState.Connected,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (diagnosticsEnabled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("Stream diagnostics: ${if (diagnosticsEnabled) "ON" else "OFF"}")
+                }
             }
             if (diagnosticsEnabled) {
                 StreamDiagnosticsPanel(firmwareDiagnostics, firmwareRates, receiveMetrics)
