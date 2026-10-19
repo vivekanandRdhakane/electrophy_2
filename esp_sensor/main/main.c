@@ -23,7 +23,7 @@
 
 /* Set to 0 for sensor debugging without BLE; rebuild after changing. */
 #ifndef USE_BLE
-#define USE_BLE 0
+#define USE_BLE 1
 #endif
 #if USE_BLE != 0 && USE_BLE != 1
 #error "USE_BLE must be 0 or 1"
@@ -76,6 +76,10 @@
 
 #if USE_BLE
 #define DEVICE_NAME       "ESP_IMU"
+#define BLE_CONNECT_TIMEOUT_MS 30000
+
+static struct ble_npl_callout ble_shutdown_callout;
+static bool ble_shutdown_requested;
 
 /* Nordic UART Service (NUS) UUIDs — Standard for BLE Terminal Apps */
 /* Service: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E */
@@ -114,6 +118,7 @@ static stmdev_ctx_t dev_ctx;
 static uint16_t ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t imu_chr_val_handle = 0;
 static bool     ble_notify_enabled = false;
+static void status_led_update_streaming(void);
 static uint8_t  own_addr_type      = BLE_OWN_ADDR_RANDOM; /* resolved at sync */
 
 /* FreeRTOS event group: set when a central is connected */
@@ -543,9 +548,11 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         /* ── Pause / Resume commands ──────────────────────────────────── */
         if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
             g_data_paused = true;
+            status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Data reading and sending PAUSED");
         } else if (strcasecmp(cmd, "resume") == 0 || strcasecmp(cmd, "start") == 0 || strcasecmp(cmd, "play") == 0) {
             g_data_paused = false;
+            status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Data reading and sending RESUMED");
 
         /* ── Stream-mode commands ──────────────────────────────────────── */
@@ -1011,12 +1018,34 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
 /* ── BLE: GAP event handler ───────────────────────────────────────────────── */
 static void ble_start_advertising(void); /* forward declaration */
 
+/* Runs on the NimBLE host queue, serialized with connection events. */
+static void ble_connection_timeout(struct ble_npl_event *event)
+{
+    (void)event;
+    if (ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    ble_shutdown_requested = true;
+    ble_gap_adv_stop();
+    ESP_LOGW(TAG_BLE, "No BLE connection for %d ms; releasing POWER_HOLD.",
+             BLE_CONNECT_TIMEOUT_MS);
+    ESP_ERROR_CHECK(gpio_set_level(PIN_POWER_HOLD, 0));
+}
+
+static void ble_start_connection_timeout(void)
+{
+    int rc = ble_npl_callout_reset(&ble_shutdown_callout,
+                                  ble_npl_time_ms_to_ticks32(BLE_CONNECT_TIMEOUT_MS));
+    ESP_ERROR_CHECK(rc);
+}
+
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
 
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            ble_npl_callout_stop(&ble_shutdown_callout);
             ble_conn_handle = event->connect.conn_handle;
             s_negotiated_mtu = BLE_ATT_MTU_DEFAULT;
             ESP_LOGI(TAG_BLE, "Connected  (conn_handle=%d)", ble_conn_handle);
@@ -1040,6 +1069,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                                                BLE_GAP_LE_PHY_2M_MASK, 0);
             if (rc != 0) ESP_LOGW(TAG_BLE, "2M PHY request failed: %d", rc);
             xEventGroupSetBits(ble_event_group, BLE_CONNECTED_BIT);
+            status_led_update_streaming();
         } else {
             ESP_LOGW(TAG_BLE, "Connect failed (status=%d) — restarting advertising",
                      event->connect.status);
@@ -1047,6 +1077,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
             ble_notify_enabled = false;
             s_negotiated_mtu   = BLE_ATT_MTU_DEFAULT;
             xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
+            status_led_update_streaming();
             ble_start_advertising();
         }
         break;
@@ -1060,12 +1091,15 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
         s_batch_sample_count = 0;
         s_notify_in_flight = 0;
         xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
+        status_led_update_streaming();
+        ble_start_connection_timeout();
         ble_start_advertising();
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == imu_chr_val_handle) {
             ble_notify_enabled = (event->subscribe.cur_notify != 0);
+            status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Notifications %s",
                      ble_notify_enabled ? "ENABLED — streaming IMU data" : "DISABLED");
         }
@@ -1092,6 +1126,9 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 /* ── BLE: start advertising ───────────────────────────────────────────────── */
 static void ble_start_advertising(void)
 {
+    if (ble_shutdown_requested) {
+        return;
+    }
     struct ble_hs_adv_fields fields = {0};
     fields.flags            = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name             = (uint8_t *)DEVICE_NAME;
@@ -1148,6 +1185,13 @@ static void ble_on_sync(void)
 static void ble_on_reset(int reason)
 {
     ESP_LOGE(TAG_BLE, "NimBLE host reset (reason=%d)", reason);
+    if (ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        ble_notify_enabled = false;
+        xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
+        status_led_update_streaming();
+        ble_start_connection_timeout();
+    }
 }
 
 /* ── BLE: NimBLE host FreeRTOS task ──────────────────────────────────────── */
@@ -1193,6 +1237,9 @@ static void ble_stack_init(void)
     ESP_ERROR_CHECK(ble_gatts_add_svcs(gatt_svcs));
 
     /* Launch the NimBLE host task (handles all BLE events internally) */
+    ble_npl_callout_init(&ble_shutdown_callout, nimble_port_get_dflt_eventq(),
+                         ble_connection_timeout, NULL);
+    ble_start_connection_timeout();
     nimble_port_freertos_init(nimble_host_task);
 }
 
@@ -1392,20 +1439,52 @@ static void sensor_task(void *arg)
 
 /* ── Entry point ──────────────────────────────────────────────────────────── */
 static int64_t status_led_start_us;
+static esp_timer_handle_t led_timer;
+static SemaphoreHandle_t status_led_mutex;
+static bool status_led_streaming;
+
+#if USE_BLE
+/* Called only on BLE state changes, never from the per-sample send path. */
+static void status_led_update_streaming(void)
+{
+    bool streaming = ble_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+                     ble_notify_enabled && !g_data_paused;
+    xSemaphoreTake(status_led_mutex, portMAX_DELAY);
+    if (streaming != status_led_streaming) {
+        status_led_streaming = streaming;
+        if (streaming) {
+            ESP_ERROR_CHECK(esp_timer_stop(led_timer));
+            /* 100% duty at 12-bit resolution: inverted output stays LOW. */
+            ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 4096));
+            ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+        } else {
+            status_led_start_us = esp_timer_get_time();
+            ESP_ERROR_CHECK(esp_timer_start_periodic(led_timer, 10000));
+        }
+    }
+    xSemaphoreGive(status_led_mutex);
+}
+#endif
 
 static void status_led_tick(void *arg)
 {
     (void)arg;
+    xSemaphoreTake(status_led_mutex, portMAX_DELAY);
+    /* A callback already queued when the timer stopped must not dim the LED. */
+    if (status_led_streaming) {
+        xSemaphoreGive(status_led_mutex);
+        return;
+    }
     /* A cosine envelope gives gentle turnarounds; square it for a more
      * even perceived brightness change. Use elapsed time to avoid drift. */
     const int64_t phase_us = (esp_timer_get_time() - status_led_start_us) % 2000000;
     const float phase = (float)phase_us / 2000000.0f;
     const float brightness = 0.5f - 0.5f * cosf(6.28318530718f * phase);
     const uint32_t duty = (uint32_t)(4095.0f * brightness * brightness + 0.5f);
-    /* This timer is the only duty writer. Direct updates do not require
-     * the LEDC fade service (unlike ledc_set_duty_and_update). */
+    /* Serialize duty writes with BLE state changes. */
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    xSemaphoreGive(status_led_mutex);
 }
 
 static void board_power_and_led_init(void)
@@ -1435,6 +1514,8 @@ static void board_power_and_led_init(void)
 
 static void status_led_start_breathing(void)
 {
+    status_led_mutex = xSemaphoreCreateMutex();
+    assert(status_led_mutex != NULL);
     /* 5 kHz hardware PWM; inverted output because the LED cathode is driven. */
     const ledc_timer_config_t pwm_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
@@ -1456,7 +1537,6 @@ static void status_led_start_breathing(void)
     };
     ESP_ERROR_CHECK(ledc_channel_config(&pwm_channel));
     /* Standby breathing: one second brighter, one second dimmer. */
-    static esp_timer_handle_t led_timer;
     const esp_timer_create_args_t timer_args = {
         .callback = status_led_tick,
         .name = "status_led",

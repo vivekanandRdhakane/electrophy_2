@@ -13,6 +13,12 @@ initialization and sampling continue without a phone. The USB monitor prints one
 gyroscope in mdps. Power hold and the LED
 remain active. This switch does not change the ESP-IDF Bluetooth sdkconfig.
 
+With `USE_BLE=1`, the device releases POWER_HOLD (GPIO21 low) if no BLE device
+connects within 30 seconds of BLE startup, or reconnects within 30 seconds after
+a disconnect. A successful connection cancels the timeout; notification
+subscription is not required. Adjust `BLE_CONNECT_TIMEOUT_MS` in `main/main.c`
+to change the timeout. This automatic shutdown is disabled with `USE_BLE=0`.
+
 - GPIO21 (ESP32-C3 package pin 28 / U0TXD) drives TPS27081 POWER_HOLD high
   from the second-stage bootloader's before-init hook and stays high in the app.
 - GPIO8 (package pin 14) drives the LED cathode: low is ON. After board power
@@ -21,6 +27,10 @@ remain active. This switch does not change the ESP-IDF Bluetooth sdkconfig.
   Standby indication then
   uses 5 kHz PWM with a smooth two-second breathing cycle: one second brighter,
   one second dimmer, starting off. Brightness is updated every 10 ms.
+  With BLE connected, notifications enabled, and streaming not paused, the LED
+  stays fully on and the breathing timer is stopped. Pausing, disabling
+  notifications, or disconnecting resumes breathing. LED updates run only on
+  these state transitions, not in the sample/notification sending loop.
 - Console output uses USB Serial/JTAG (GPIO18/19), freeing GPIO21 from UART TX.
   Use the native USB connection for logs.
 
