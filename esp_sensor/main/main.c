@@ -209,6 +209,14 @@ typedef struct {
 } imu_perf_t;
 static imu_perf_t s_perf, s_perf_snapshot;
 static volatile uint32_t s_irq_count;
+/* Sensor-task-owned FIFO state; combined modes retain direct-register tuples. */
+static bool s_fifo_active, s_fifo_backlog;
+static uint32_t s_fifo_generation = UINT32_MAX;
+static uint32_t s_fifo_overruns, s_fifo_flushed, s_fifo_unexpected;
+static uint16_t s_fifo_level, s_fifo_peak;
+static uint8_t s_fifo_watermark;
+static bool imu_fifo_sync(void);
+static void imu_fifo_drain(void);
 static inline void perf_add(perf_stage_t *stage, uint32_t start)
 {
     uint32_t elapsed = esp_cpu_get_cycle_count() - start;
@@ -285,10 +293,10 @@ static volatile uint32_t g_drdy_timeout_ms = 350;      /* 5 × 66.7 ms ≈ 333 m
  * that High-G DRDY triggers INT1 when streaming High-G, Low-G DRDY triggers
  * INT1 when streaming Low-G, etc.
  */
-static void update_int_routing(void)
+static int32_t update_int_routing(void)
 {
     if (spi_mutex == NULL) {
-        return;
+        return -1;
     }
 
     lsm6dsv320x_pin_int_route_t pin_int = {0};
@@ -334,11 +342,18 @@ static void update_int_routing(void)
         break;
     }
 
-    lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
-    lsm6dsv320x_pin_int1_route_hg_set(&dev_ctx, &pin_int);
+#if USE_BLE
+    if (s_fifo_active) {
+        memset(&pin_int, 0, sizeof(pin_int));
+        pin_int.fifo_th = PROPERTY_ENABLE;
+    }
+#endif
+    int32_t rc = lsm6dsv320x_pin_int1_route_set(&dev_ctx, &pin_int);
+    rc |= lsm6dsv320x_pin_int1_route_hg_set(&dev_ctx, &pin_int);
 
-    ESP_LOGI("INT_ROUTE", "INT1 routing updated: mode=%d xl=%u hg=%u g=%u",
-             current_stream_mode, pin_int.drdy_xl, pin_int.drdy_hg_xl, pin_int.drdy_g);
+    ESP_LOGI("INT_ROUTE", "INT1 routing updated: mode=%d xl=%u hg=%u g=%u fifo=%u",
+             current_stream_mode, pin_int.drdy_xl, pin_int.drdy_hg_xl, pin_int.drdy_g, pin_int.fifo_th);
+    return rc;
 }
 
 /**
@@ -1037,6 +1052,133 @@ static void ble_start_connection_timeout(void)
     ESP_ERROR_CHECK(rc);
 }
 
+/* Based on ST read_fifo: continuous FIFO and uncompressed tagged entries.
+ * Read one complete seven-byte entry per SPI transaction (platform limit 32). */
+static float imu_fifo_rate(void)
+{
+    switch (current_stream_mode) {
+    case STREAM_MODE_LOW_ACC: return g_xl_odr_hz;
+    case STREAM_MODE_HIGH_ACC: return g_hg_odr_hz;
+    case STREAM_MODE_ONLY_GYRO: return g_gy_odr_hz;
+    default: return 0;
+    }
+}
+
+static uint8_t imu_fifo_bdr(float hz)
+{
+    /* XL and gyro batch-rate encodings match in the ST driver. */
+    static const float rates[] = {0, 1.875f, 7.5f, 15, 30, 60, 120, 240, 480, 960, 1920, 3840, 7680};
+    for (uint8_t i = 1; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        if (hz == rates[i]) return i;
+    }
+    return 0;
+}
+
+static bool imu_fifo_sync(void)
+{
+    static bool last_running;
+    static int64_t retry_after;
+    bool running = !g_data_paused && ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+    if (s_fifo_generation == s_stream_generation && last_running == running) return true;
+    if (esp_timer_get_time() < retry_after) return false;
+    xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
+    uint32_t generation = s_stream_generation;
+    running = !g_data_paused && ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+    float rate = imu_fifo_rate();
+    bool enable = running && rate > 0;
+    lsm6dsv320x_fifo_status_t status = {0};
+    int32_t rc = lsm6dsv320x_fifo_status_get(&dev_ctx, &status);
+    rc |= lsm6dsv320x_fifo_mode_set(&dev_ctx, LSM6DSV320X_BYPASS_MODE);
+    if (rc == 0) s_fifo_flushed += status.fifo_level;
+    s_fifo_active = false;
+    s_fifo_backlog = false;
+    s_fifo_level = 0;
+    imu_discard_pending();
+    s_sensor_generation = generation;
+    uint8_t bdr = imu_fifo_bdr(rate);
+    rc |= lsm6dsv320x_fifo_xl_batch_set(&dev_ctx,
+        (lsm6dsv320x_fifo_xl_batch_t)(enable && current_stream_mode == STREAM_MODE_LOW_ACC ? bdr : 0));
+    rc |= lsm6dsv320x_fifo_gy_batch_set(&dev_ctx,
+        (lsm6dsv320x_fifo_gy_batch_t)(enable && current_stream_mode == STREAM_MODE_ONLY_GYRO ? bdr : 0));
+    rc |= lsm6dsv320x_fifo_hg_xl_batch_set(&dev_ctx, enable && current_stream_mode == STREAM_MODE_HIGH_ACC);
+    rc |= lsm6dsv320x_fifo_compress_algo_set(&dev_ctx, LSM6DSV320X_CMP_DISABLE);
+    rc |= lsm6dsv320x_fifo_timestamp_batch_set(&dev_ctx, LSM6DSV320X_TMSTMP_NOT_BATCHED);
+    s_fifo_watermark = rate >= 480 ? 16 : 1;
+    rc |= lsm6dsv320x_fifo_watermark_set(&dev_ctx, s_fifo_watermark);
+    if (rc == 0 && enable) rc = lsm6dsv320x_fifo_mode_set(&dev_ctx, LSM6DSV320X_STREAM_MODE);
+    s_fifo_active = rc == 0 && enable;
+    rc |= update_int_routing();
+    if (rc != 0) s_fifo_active = false;
+    ulTaskNotifyTake(pdTRUE, 0);
+    if (rc == 0) {
+        s_fifo_generation = generation;
+        last_running = running;
+        retry_after = 0;
+        ESP_LOGI("FIFO", "mode=%d active=%u rate=%.2f watermark=%u flushed=%lu",
+                 current_stream_mode, s_fifo_active, rate, s_fifo_watermark, (unsigned long)s_fifo_flushed);
+    } else {
+        s_stats.read_errors++;
+        retry_after = esp_timer_get_time() + 1000000;
+        ESP_LOGE("FIFO", "Configuration failed rc=%ld; retry in 1 second", (long)rc);
+    }
+    xSemaphoreGiveRecursive(spi_mutex);
+    return rc == 0;
+}
+
+static void imu_fifo_drain(void)
+{
+    bool profile = s_diagnostics_enabled;
+    uint32_t start = profile ? esp_cpu_get_cycle_count() : 0;
+    xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
+    if (profile) perf_add(&s_perf.lock, start);
+    if (!s_fifo_active || s_fifo_generation != s_stream_generation || g_data_paused || !ble_notify_enabled) {
+        xSemaphoreGiveRecursive(spi_mutex);
+        return;
+    }
+    /* Include the latched overrun bit which ST's status getter omits. Reading
+     * both status bytes together also gives the level from this observation. */
+    uint8_t status[2] = {0};
+    int32_t rc = lsm6dsv320x_read_reg(&dev_ctx, LSM6DSV320X_FIFO_STATUS1, status, 2);
+    if (rc != 0) {
+        s_stats.read_errors++;
+        s_fifo_backlog = false;
+        xSemaphoreGiveRecursive(spi_mutex);
+        return;
+    }
+    s_fifo_level = (uint16_t)status[0] | (uint16_t)(status[1] & 1u) << 8;
+    if (s_fifo_level > s_fifo_peak) s_fifo_peak = s_fifo_level;
+    if (status[1] & 0x48u) s_fifo_overruns++; /* Current or latched overrun; not a loss count. */
+    /* Bound mutex ownership; return to transport/watchdog between chunks. */
+    uint16_t count = s_fifo_level > 32 ? 32 : s_fifo_level;
+    s_fifo_backlog = s_fifo_level > count;
+    for (uint16_t i = 0; i < count; i++) {
+        lsm6dsv320x_fifo_out_raw_t entry = {0};
+        if (profile) start = esp_cpu_get_cycle_count();
+        rc = lsm6dsv320x_fifo_out_raw_get(&dev_ctx, &entry);
+        if (profile) perf_add(&s_perf.read, start);
+        if (rc != 0) {
+            s_stats.read_errors++;
+            /* Partial read can leave entry pointer uncertain: flush before reuse. */
+            s_fifo_generation = s_stream_generation - 1;
+            s_fifo_backlog = false;
+            break;
+        }
+        s_fifo_level--;
+        uint8_t expected = current_stream_mode == STREAM_MODE_LOW_ACC ? LSM6DSV320X_XL_NC_TAG :
+            current_stream_mode == STREAM_MODE_HIGH_ACC ? LSM6DSV320X_XL_HG_TAG : LSM6DSV320X_GY_NC_TAG;
+        if (entry.tag != expected) { s_fifo_unexpected++; continue; }
+        if (s_fifo_generation != s_stream_generation) break;
+        int16_t raw[3];
+        for (unsigned a = 0; a < 3; a++) raw[a] = (int16_t)((uint16_t)entry.data[2*a] | (uint16_t)entry.data[2*a+1] << 8);
+        s_stats.acquired++;
+        if (profile) start = esp_cpu_get_cycle_count();
+        imu_accumulate_sample(raw, raw, raw); /* Single-sensor mode selects one. */
+        if (profile) perf_add(&s_perf.pack, start);
+    }
+    xSemaphoreGiveRecursive(spi_mutex);
+    imu_drain_tx();
+}
+
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -1305,7 +1447,12 @@ static uint32_t diag_read_u32(const uint8_t *p)
 static void ble_diagnostics_tick(struct ble_npl_event *event)
 {
     (void)event;
-    static uint32_t last_overflow, last_errors;
+    static uint32_t last_overflow, last_errors, last_fifo_overruns;
+    if (s_fifo_overruns != last_fifo_overruns) {
+        ESP_LOGW("FIFO", "Hardware overrun observations=%lu; lost sample count unknown",
+                 (unsigned long)s_fifo_overruns);
+        last_fifo_overruns = s_fifo_overruns;
+    }
     if (s_stats.overflow != last_overflow || s_stats.notify_errors != last_errors) {
         ESP_LOGW("STREAM", "Queue overflow dropped=%lu samples, permanent notify errors=%lu (since boot)",
                  (unsigned long)s_stats.overflow, (unsigned long)s_stats.notify_errors);
@@ -1344,6 +1491,9 @@ static void ble_diagnostics_tick(struct ble_npl_event *event)
         ESP_LOGI("STREAM", "%s RSSI=%d MTU=%u interval=%.2fms PHY=%u/%u DLE=%u",
                  latest_ble_str, rssi, s_negotiated_mtu, s_link_interval * 1.25,
                  s_link_tx_phy, s_link_rx_phy, s_link_tx_octets);
+        ESP_LOGI("FIFO", "active=%u level=%u peak=%u overrun_observations=%lu flushed=%lu unexpected_tags=%lu",
+                 s_fifo_active, s_fifo_level, s_fifo_peak, (unsigned long)s_fifo_overruns,
+                 (unsigned long)s_fifo_flushed, (unsigned long)s_fifo_unexpected);
         if (perf.window_us) {
             double scale = 1000000.0 / perf.window_us;
             ESP_LOGI("PERF", "window_ms=%lu irq_hz=%.1f acquired_hz=%.1f coalesced_hz=%.1f discarded=%lu read_errors=%lu",
@@ -1505,6 +1655,7 @@ static void sensor_task(void *arg)
 
         /* ── Gate: pause until a BLE central is connected ─────────────── */
 #if USE_BLE
+        if (!imu_fifo_sync()) { vTaskDelay(1); continue; }
         imu_publish_diagnostics(loop_now_us);
         imu_drain_tx();
         if (!(xEventGroupGetBits(ble_event_group) & BLE_CONNECTED_BIT)) {
@@ -1544,9 +1695,17 @@ static void sensor_task(void *arg)
         TickType_t wait_ticks = pdMS_TO_TICKS(g_drdy_timeout_ms);
 #if USE_BLE
         bool retry_wait = s_tx_queue.count > 0;
-        if (retry_wait) wait_ticks = 1; /* Keep retrying even at a low sensor ODR. */
+        if (retry_wait || s_fifo_active) wait_ticks = 1;
+        if (s_fifo_active && s_fifo_backlog) wait_ticks = 0;
 #endif
         uint32_t ready_count = ulTaskNotifyTake(pdTRUE, wait_ticks);
+#if USE_BLE
+        if (s_fifo_active) {
+            /* Poll as well: an already-high watermark must not strand data. */
+            imu_fifo_drain();
+            continue;
+        }
+#endif
         if (!ready_count) {
 #if USE_BLE
             if (!retry_wait) s_stats.timeouts++;

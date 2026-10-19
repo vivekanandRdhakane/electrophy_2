@@ -161,7 +161,63 @@ service delays and notification coalescing. Large notify maxima can delay
 acquisition even with zero retries. If IRQ rate is below the estimate, measure
 physical INT1 pulses with a logic analyzer before attributing the gap to RF.
 If acquisition/submission match but the phone receives fewer samples, investigate
-transport and phone processing. Existing direct-register reads cannot recover
-intermediate samples; the sensor's hardware FIFO is a potential next change once
-these measurements establish the loss point. Firmware does not enable FIFO or
-alter the ODR/PHY/antenna settings in this diagnostic change.
+transport and phone processing. Direct-register reads cannot recover intermediate samples. The hardware FIFO
+implementation below addresses that limitation for single-sensor BLE streams.
+ODR/PHY/antenna settings are not altered by the FIFO change.
+
+
+## Hardware FIFO acquisition
+
+Low-G-only, High-G-only, and gyro-only BLE streams now use continuous hardware
+FIFO, following the local ST example
+`STMems_Standard_C_drivers/lsm6dsv320x_STdC/examples/lsm6dsv320x_read_fifo.c`.
+Only the selected sensor is batched at its configured rate. INT1 routes the FIFO
+watermark; the task reads status and uncompressed tagged seven-byte entries.
+Compression and timestamp batching are disabled. BLE sample packets are unchanged;
+no Android update is required for FIFO acquisition.
+
+Watermark is 16 entries at rates >=480 Hz, one entry below that. Each pass reads
+at most 32 entries, releases the configuration mutex, then submits BLE data.
+Known backlog is drained without waiting for a new edge; a one-RTOS-tick fallback
+poll prevents an already-high watermark from stranding data. Individual reads
+remain within the SPI platform's 32-byte limit. The hardware FIFO retains samples
+while BLE submission occupies the task; the physical sensor ODR is unchanged.
+
+Stream-generation changes (ODR/range/mode, pause/resume, subscription, connection,
+and MTU changes) discard old software packets and flush hardware FIFO through
+bypass before restarting. FIFO is disabled while paused/disconnected. ALL and
+BOTH ACC retain direct-register tuples: combining asynchronous FIFO streams at
+different ODRs needs a separately defined alignment policy. USE_BLE=0 is unchanged.
+Configuration failures stop acquisition and retry once per second. Entry-read
+failures force FIFO flush/reconfiguration before further samples are accepted.
+
+USB FIFO fields:
+
+- `active`: whether the current stream uses FIFO.
+- `level`: last observed level minus consumed entries; excludes arrivals during
+  the drain. `peak`: highest observed pre-drain level since boot.
+- `overrun_observations`: status reads reporting current or latched overrun, not
+  exact lost samples or distinct events. Changes warn even with diagnostics OFF.
+- `flushed`: entries observed before FIFO bypass, separate from software
+  `discarded` because these entries were never counted as acquired.
+- `unexpected_tags`: entries not matching the selected sensor.
+
+In FIFO mode PERF `irq_hz` counts watermark interrupts, not samples. Compare
+`acquired_hz` and phone receive rate. `coalesced` remains cumulative but only grows
+on the direct-register path; notification coalescing does not discard FIFO entries.
+`read` timing is per FIFO entry, `lock` per drain pass. FIFO status-read overhead
+is outside `read` timing. FIFO fields are live observations; STREAM counters use
+the completed-operation snapshot.
+
+Hardware checks still required:
+
+1. Low-G 7680/3840 Hz, Record OFF: wait five seconds after each setting change,
+   then capture 20 seconds of STREAM/FIFO/PERF and phone receive rate. For the
+   measured FREQ_FINE=-46 board, aim near 7218/3609 acquired samples/s, zero
+   overruns/unexpected tags/read errors, and no sustained software queue growth.
+2. Repeat High-G-only and gyro-only, checking axis signs and scale with known
+   motion/static orientation. Test 15 Hz for timely delivery and duplicates.
+3. Exercise range/ODR changes, pause/resume, reconnect, and single/combined mode
+   transitions. Confirm old-range samples are not delivered after changes.
+4. Compare diagnostics ON/OFF and recording ON/OFF. Build checks alone do not
+   validate physical FIFO operation or delivered throughput.
