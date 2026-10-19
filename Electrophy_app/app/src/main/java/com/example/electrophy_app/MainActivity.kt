@@ -190,15 +190,39 @@ class BleViewModel : ViewModel() {
     private var sessionStartTimeMs = System.currentTimeMillis()
     private var lastAssignedTimeMs = 0L
     private var lastTerminalUpdateTimeMs = 0L
-    private var sampleRateWindowStartMs = SystemClock.elapsedRealtime()
-    private var samplesInRateWindow = 0
+    private val receiveMeter = ReceiveRateMeter()
+    private val firmwareRateTracker = FirmwareRateTracker()
+    private var lastChartUpdateMs = 0L
+    @Volatile private var lastDiagnosticsMs = 0L
+    private val _diagnosticsEnabled = MutableStateFlow(false)
+    val diagnosticsEnabled: StateFlow<Boolean> = _diagnosticsEnabled
+    private val _firmwareDiagnostics = MutableStateFlow<FirmwareDiagnostics?>(null)
+    val firmwareDiagnostics: StateFlow<FirmwareDiagnostics?> = _firmwareDiagnostics
+    private val _firmwareRates = MutableStateFlow<FirmwareRates?>(null)
+    val firmwareRates: StateFlow<FirmwareRates?> = _firmwareRates
+    private val _receiveMetrics = MutableStateFlow(ReceiveMetrics(0, 0, 0, 0))
+    val receiveMetrics: StateFlow<ReceiveMetrics> = _receiveMetrics
+
+    fun setDiagnosticsEnabled(enabled: Boolean) {
+        _diagnosticsEnabled.value = enabled
+        firmwareRateTracker.reset()
+        lastDiagnosticsMs = 0L
+        _firmwareDiagnostics.value = null
+        _firmwareRates.value = null
+        sendCommand(if (enabled) "diag_on" else "diag_off")
+    }
 
     private fun resetSession() {
         sessionStartTimeMs = System.currentTimeMillis()
         lastAssignedTimeMs = 0L
         lastTerminalUpdateTimeMs = 0L
-        sampleRateWindowStartMs = SystemClock.elapsedRealtime()
-        samplesInRateWindow = 0
+        receiveMeter.reset(SystemClock.elapsedRealtime())
+        firmwareRateTracker.reset()
+        lastChartUpdateMs = 0L
+        lastDiagnosticsMs = 0L
+        _firmwareDiagnostics.value = null
+        _firmwareRates.value = null
+        _receiveMetrics.value = ReceiveMetrics(0, 0, 0, 0)
         _receivedSamplesPerSecond.value = 0
         resetFilterState()
         _isCalibrating.value = false
@@ -671,6 +695,20 @@ class BleViewModel : ViewModel() {
     private val commandQueue = ArrayDeque<String>()
     private var isGattBusy = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val receiveRateTick = object : Runnable {
+        override fun run() {
+            if (_connectionState.value != ConnectionState.Connected) return
+            val now = SystemClock.elapsedRealtime()
+            val metrics = receiveMeter.snapshot(now)
+            _receiveMetrics.value = metrics
+            _receivedSamplesPerSecond.value = metrics.samplesPerSecond
+            if (now - lastDiagnosticsMs > 6000L) {
+                _firmwareDiagnostics.value = null
+                _firmwareRates.value = null
+            }
+            mainHandler.postDelayed(this, SAMPLE_RATE_UPDATE_INTERVAL_MS)
+        }
+    }
     private val gattWriteTimeoutRunnable = Runnable {
         if (isGattBusy) {
             Log.w(BLE_TAG, "GATT write timeout — advancing command queue")
@@ -715,7 +753,11 @@ class BleViewModel : ViewModel() {
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _connectionState.value = ConnectionState.Disconnected
                 _isPaused.value = false
+                _receivedSamplesPerSecond.value = 0
+                _firmwareDiagnostics.value = null
+                _firmwareRates.value = null
                 mainHandler.post {
+                    mainHandler.removeCallbacks(receiveRateTick)
                     mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
                     commandQueue.clear()
                     isGattBusy = false
@@ -773,6 +815,10 @@ class BleViewModel : ViewModel() {
                     }
                     _connectionState.value = ConnectionState.Connected
                     resetSession()
+                    mainHandler.post {
+                        mainHandler.removeCallbacks(receiveRateTick)
+                        mainHandler.postDelayed(receiveRateTick, SAMPLE_RATE_UPDATE_INTERVAL_MS)
+                    }
                     // Synchronize all active sensor settings (Pause/Resume, Ranges, ODRs, and Stream Mode)
                     // through the serialized GATT command queue once CCCD write finishes.
                     syncFullConfigurationToDevice()
@@ -832,6 +878,15 @@ class BleViewModel : ViewModel() {
     }
 
     private fun handleIncomingData(value: ByteArray) {
+        if (StreamDiagnosticsDecoder.isDiagnostic(value)) {
+            val frame = StreamDiagnosticsDecoder.decode(value) ?: return
+            if (_diagnosticsEnabled.value) {
+                lastDiagnosticsMs = SystemClock.elapsedRealtime()
+                _firmwareRates.value = firmwareRateTracker.update(frame)
+                _firmwareDiagnostics.value = frame
+            }
+            return
+        }
         if (value.size >= 9 && value[0] == 0xAA.toByte() && value[1] == 0x55.toByte()) {
             processBinaryPacket(value)
         } else {
@@ -844,11 +899,13 @@ class BleViewModel : ViewModel() {
         val decoded = when (val res = PacketDecoder.decode(bytes)) {
             is DecodeResult.Success -> res.packet
             is DecodeResult.Error -> {
+                receiveMeter.invalidPacket()
                 Log.w(BLE_TAG, "processBinaryPacket: dropped invalid frame: ${res.reason}")
                 return
             }
         }
 
+        receiveMeter.record(decoded.sampleCount, decoded.seq)
         val rawNowMs = System.currentTimeMillis() - sessionStartTimeMs
         val nowMs = if (rawNowMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawNowMs
         val dt = (nowMs - lastAssignedTimeMs).toFloat() / decoded.sampleCount.coerceAtLeast(1)
@@ -878,7 +935,6 @@ class BleViewModel : ViewModel() {
         }
 
         appendBatchPoints(filteredLowG, filteredHighG, filteredGyro)
-        recordReceivedSamples(maxOf(filteredLowG.size, filteredHighG.size, filteredGyro.size))
 
         // Human-readable terminal update (throttled to ~10 Hz to prevent UI thread lag)
         val now = System.currentTimeMillis()
@@ -996,11 +1052,16 @@ class BleViewModel : ViewModel() {
         if (newHighG.isNotEmpty()) highGBuffer.append(newHighG)
         if (effGyro.isNotEmpty()) gyroBuffer.append(effGyro)
 
-        _chartData.value = ChartData(
-            lowG = lowGBuffer.getPoints(),
-            highG = highGBuffer.getPoints(),
-            gyro = gyroBuffer.getPoints()
-        )
+        // Store every sample, but copy chart histories at most 20 times/second.
+        val chartNow = SystemClock.elapsedRealtime()
+        if (chartNow - lastChartUpdateMs >= 50L) {
+            lastChartUpdateMs = chartNow
+            _chartData.value = ChartData(
+                lowG = lowGBuffer.getPoints(),
+                highG = highGBuffer.getPoints(),
+                gyro = gyroBuffer.getPoints()
+            )
+        }
     }
 
     private fun updateAttitudeFromBatch(
@@ -1121,6 +1182,16 @@ class BleViewModel : ViewModel() {
         }
         bluetoothGatt?.disconnect()
         _connectionState.value = ConnectionState.Disconnected
+        _receivedSamplesPerSecond.value = 0
+        _firmwareDiagnostics.value = null
+        _firmwareRates.value = null
+        mainHandler.removeCallbacks(receiveRateTick)
+    }
+
+    override fun onCleared() {
+        mainHandler.removeCallbacksAndMessages(null)
+        bluetoothGatt?.close()
+        super.onCleared()
     }
 
     private fun appendLog(data: String) {
@@ -1191,6 +1262,7 @@ class BleViewModel : ViewModel() {
         sendCommand("odr_high_g_${_highGOdr.value}")
         sendCommand("odr_gyro_${_gyroOdr.value}")
         sendCommand(_selectedMode.value.command)
+        if (_diagnosticsEnabled.value) sendCommand("diag_on")
     }
 
     private fun processIncomingLine(rawLine: String): Boolean {
@@ -1229,19 +1301,8 @@ class BleViewModel : ViewModel() {
         }
     }
 
-    /** Updates the UI only once per two-second window, keeping the receive path lightweight. */
     private fun recordReceivedSamples(sampleCount: Int) {
-        if (sampleCount <= 0) return
-
-        samplesInRateWindow += sampleCount
-        val nowMs = SystemClock.elapsedRealtime()
-        val elapsedMs = nowMs - sampleRateWindowStartMs
-        if (elapsedMs >= SAMPLE_RATE_UPDATE_INTERVAL_MS) {
-            _receivedSamplesPerSecond.value =
-                ((samplesInRateWindow * 1_000L) / elapsedMs).toInt()
-            samplesInRateWindow = 0
-            sampleRateWindowStartMs = nowMs
-        }
+        receiveMeter.record(sampleCount)
     }
 
     private fun parseXyzPoints(line: String): List<AxisPoint> =
@@ -1514,6 +1575,10 @@ fun BleAppScreen(
     val connectionState by viewModel.connectionState.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
+    val diagnosticsEnabled by viewModel.diagnosticsEnabled.collectAsState()
+    val firmwareDiagnostics by viewModel.firmwareDiagnostics.collectAsState()
+    val firmwareRates by viewModel.firmwareRates.collectAsState()
+    val receiveMetrics by viewModel.receiveMetrics.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
     val selectedMode by viewModel.selectedMode.collectAsState()
     val chartData by viewModel.chartData.collectAsState()
@@ -1695,6 +1760,17 @@ fun BleAppScreen(
                 ) {
                     Text(if (isRecording) "Stop & Export" else "Record")
                 }
+            }
+
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Stream diagnostics", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                Switch(checked = diagnosticsEnabled,
+                    onCheckedChange = viewModel::setDiagnosticsEnabled,
+                    enabled = connectionState == ConnectionState.Connected)
+            }
+            if (diagnosticsEnabled) {
+                StreamDiagnosticsPanel(firmwareDiagnostics, firmwareRates, receiveMetrics)
             }
 
             // Graph mode selector

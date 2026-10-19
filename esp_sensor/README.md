@@ -19,6 +19,22 @@ a disconnect. A successful connection cancels the timeout; notification
 subscription is not required. Adjust `BLE_CONNECT_TIMEOUT_MS` in `main/main.c`
 to change the timeout. This automatic shutdown is disabled with `USE_BLE=0`.
 
+## Streaming performance and diagnostics
+
+Binary samples keep the existing AA55 / 12-bit packet format. Temporary NimBLE
+buffer exhaustion now retries the oldest packet from a bounded 16-packet queue
+instead of immediately discarding it. Sustained overload can still fill the
+queue; overflow samples and permanent notification errors are reported every
+two seconds when their counts change. Short SPI accesses use polling transfers,
+and packed axes are written directly as bytes/nibbles.
+
+In the updated Android app, enable **Stream diagnostics** after connecting.
+It sends `diag_on`; `diag_off` disables the additional diagnostic traffic and
+periodic detailed USB logs. The panel compares acquired samples, samples
+submitted to NimBLE, and samples decoded on the phone, and shows queue/drop
+counts and negotiated link settings. See [STREAM_DIAGNOSTICS.md](STREAM_DIAGNOSTICS.md)
+for counter definitions, protocol layout, and the board-comparison procedure.
+
 - GPIO21 (ESP32-C3 package pin 28 / U0TXD) drives TPS27081 POWER_HOLD high
   from the second-stage bootloader's before-init hook and stays high in the app.
 - GPIO8 (package pin 14) drives the LED cathode: low is ON. After board power

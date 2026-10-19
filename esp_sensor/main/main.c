@@ -58,6 +58,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "imu_transport.h"
 #endif
 
 #include "lsm6dsv320x_reg.h"
@@ -104,10 +105,10 @@ static const char *TAG_BLE = "BLE";
 static const char *TAG = "LSM6DSV320X";
 static spi_device_handle_t spi_handle;
 static TaskHandle_t        sensor_task_handle = NULL;
+static volatile bool sensor_ready;
 
-/* Serialises SPI access between the sensor task and the NimBLE host task.
- * `spi_device_transmit()` is a blocking queue+get-result pair; concurrent calls
- * from two tasks can receive each other's result (assert in spi_master.c). */
+/* Serialize polling SPI and complete sample/configuration operations. The
+ * recursive mutex lets register helpers share the same operation-level lock. */
 static SemaphoreHandle_t spi_mutex;
 
 /* Driver context — file-scope so BLE command handler can reconfigure ODR */
@@ -142,11 +143,9 @@ static volatile bool          g_data_paused       = false;
 /* ── Binary Streaming Protocol ───────────────────────────────────────────── */
 #define BINARY_MAGIC_0  0xAA
 #define BINARY_MAGIC_1  0x55
-#define BINARY_PACKET_MAX_BYTES 512
-/* Deeper controller queue: lets the host/controller pipeline stay full during
- * bursts. The 512-byte notifications each consume 2x256-byte msys blocks;
- * 12 in-flight is still well within CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=48. */
-#define MAX_BLE_NOTIFY_IN_FLIGHT 12
+#define BINARY_PACKET_MAX_BYTES IMU_PACKET_BYTES
+/* NOTIFY_TX is submission, not radio ACK. Retain packets for bounded retries. */
+#define BLE_TX_RETRY_US 2000LL
 
 /* Payload formats (header field `fmt`) */
 #define BINARY_FMT_16BIT 0   /* legacy: raw 16-bit per axis */
@@ -184,11 +183,25 @@ static uint8_t  s_batch_sample_count = 0;
 static uint8_t  s_batch_seq = 0;
 static uint32_t s_batch_bitpos = 0;   /* bit offset of next packed axis in s_batch_buf */
 static int64_t  s_last_batch_send_time = 0;
-/* Notifications are asynchronous. Bound the queue so a high ODR cannot
- * exhaust NimBLE's mbuf pool before the controller transmits older packets. */
-static volatile uint8_t s_notify_in_flight = 0;
-static uint32_t s_dropped_sample_count = 0;
-static int64_t s_last_drop_report_time = 0;
+static imu_tx_queue_t s_tx_queue;
+static int64_t s_next_tx_retry_us;
+/* Host owns generation; sensor task alone owns batches and the retry queue. */
+static volatile uint32_t s_stream_generation;
+static uint32_t s_sensor_generation;
+static volatile bool s_diagnostics_enabled;
+static struct ble_npl_callout s_diagnostics_callout;
+static uint8_t s_diagnostics_snapshot[72];
+static void imu_publish_diagnostics(int64_t now_us);
+static uint16_t s_link_interval, s_link_tx_octets;
+static uint8_t s_link_tx_phy, s_link_rx_phy;
+static struct {
+    uint32_t acquired, submitted, overflow, discarded;
+    uint32_t coalesced, timeouts, read_errors, retries, notify_errors;
+    uint32_t bytes, packets;
+} s_stats;
+static void imu_discard_pending(void);
+static void imu_drain_tx(void);
+
 #endif
 
 /* ── Dynamic ODR tracking ─────────────────────────────────────────────────── */
@@ -242,7 +255,6 @@ static inline float convert_gy_to_mdps(int16_t lsb, lsm6dsv320x_gy_full_scale_t 
  * Send-interval: one BLE packet per cycle of the slowest active sensor.
  * DRDY timeout : 5× the slowest period (floor 50 ms) so a missed INT1 pulse
  *               doesn't stall the loop for more than one extra cycle. */
-static volatile int64_t g_send_interval_us = 66667LL;  /* 1/15 Hz ≈ 66 667 µs */
 static volatile uint32_t g_drdy_timeout_ms = 350;      /* 5 × 66.7 ms ≈ 333 ms */
 
 /**
@@ -311,7 +323,7 @@ static void update_int_routing(void)
 }
 
 /**
- * @brief Recompute g_send_interval_us, g_drdy_timeout_ms, and update INT1 routing.
+ * @brief Recompute the data-ready timeout, and update INT1 routing.
  *
  * Call this after changing any sensor ODR or stream mode so the main loop self-adjusts.
  * The DRDY timeout is 5× the period of the active streaming sensor, min 50 ms.
@@ -356,22 +368,16 @@ static void odr_recompute_timing(void)
     int64_t  period_us  = (int64_t)(1e6f / active_hz);
     uint32_t timeout_ms = (uint32_t)((5.0f * 1000.0f) / active_hz);
 
-    if (period_us  < 1000LL) period_us  = 1000LL;   /* floor 1 ms  */
     if (timeout_ms < 50)     timeout_ms = 50;         /* floor 50 ms */
 
-    g_send_interval_us = period_us;
     g_drdy_timeout_ms  = timeout_ms;
 
-    ESP_LOGI("ODR", "Timing updated: mode=%d active_odr=%.3f Hz  send_interval=%lld µs  drdy_timeout=%lu ms",
+    ESP_LOGI("ODR", "Timing updated: mode=%d active_odr=%.3f Hz  sample_period=%lld µs  drdy_timeout=%lu ms",
              current_stream_mode, active_hz, (long long)period_us, (unsigned long)timeout_ms);
 
     /* Update hardware INT1 interrupt routing */
     update_int_routing();
 
-    /* Unblock the sensor task if waiting on previous timeout */
-    if (sensor_task_handle != NULL) {
-        xTaskNotifyGive(sensor_task_handle);
-    }
 }
 
 /* ── INT1 ISR ─────────────────────────────────────────────────────────────── */
@@ -391,26 +397,26 @@ static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp, ui
 {
     (void)handle;
 
-    xSemaphoreTake(spi_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
 
     gpio_set_level(PIN_CS, 0);
 
     spi_transaction_t t = {0};
     t.length    = 8;
     t.tx_buffer = &reg;
-    spi_device_transmit(spi_handle, &t);
+    esp_err_t rc = spi_device_polling_transmit(spi_handle, &t);
 
-    if (len > 0) {
+    if (rc == ESP_OK && len > 0) {
         memset(&t, 0, sizeof(t));
         t.length    = len * 8;
         t.tx_buffer = bufp;
-        spi_device_transmit(spi_handle, &t);
+        rc = spi_device_polling_transmit(spi_handle, &t);
     }
 
     gpio_set_level(PIN_CS, 1);
 
-    xSemaphoreGive(spi_mutex);
-    return 0;
+    xSemaphoreGiveRecursive(spi_mutex);
+    return rc;
 }
 
 /**
@@ -430,14 +436,12 @@ static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t 
     uint8_t __attribute__((aligned(4))) tx[33];
     uint8_t __attribute__((aligned(4))) rx[33];
 
-    if (len > 32) {
-        len = 32;   /* this app only ever reads up to 6 bytes (3×int16) */
-    }
+    if (len > 32) return ESP_ERR_INVALID_SIZE;
 
     tx[0] = reg;
     memset(&tx[1], 0x00, len);
 
-    xSemaphoreTake(spi_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
 
     gpio_set_level(PIN_CS, 0);
 
@@ -446,14 +450,14 @@ static int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t 
     t.rxlength  = (len + 1) * 8;
     t.tx_buffer = tx;
     t.rx_buffer = rx;
-    spi_device_transmit(spi_handle, &t);
+    esp_err_t rc = spi_device_polling_transmit(spi_handle, &t);
 
     gpio_set_level(PIN_CS, 1);
 
-    xSemaphoreGive(spi_mutex);
+    xSemaphoreGiveRecursive(spi_mutex);
 
-    memcpy(bufp, &rx[1], len);
-    return 0;
+    if (rc == ESP_OK) memcpy(bufp, &rx[1], len);
+    return rc;
 }
 
 /**
@@ -468,7 +472,7 @@ static void platform_delay(uint32_t ms)
 
 static void spi_init(void)
 {
-    spi_mutex = xSemaphoreCreateMutex();
+    spi_mutex = xSemaphoreCreateRecursiveMutex();
     assert(spi_mutex != NULL);
 
     spi_bus_config_t bus_cfg = {
@@ -546,6 +550,14 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         ESP_LOGI(TAG_BLE, "Received command: \"%s\"", cmd);
 
         /* ── Pause / Resume commands ──────────────────────────────────── */
+        if (strcasecmp(cmd, "diag_on") == 0 || strcasecmp(cmd, "diag_off") == 0) {
+            s_diagnostics_enabled = strcasecmp(cmd, "diag_on") == 0;
+            return 0;
+        }
+        if (!sensor_ready) return BLE_ATT_ERR_UNLIKELY;
+        xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
+        s_stream_generation++;
+
         if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
             g_data_paused = true;
             status_led_update_streaming();
@@ -558,27 +570,22 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         /* ── Stream-mode commands ──────────────────────────────────────── */
         } else if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
             current_stream_mode = STREAM_MODE_LOW_ACC;
-            s_batch_sample_count = 0;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
             current_stream_mode = STREAM_MODE_HIGH_ACC;
-            s_batch_sample_count = 0;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: HIGH-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "both_acc") == 0 || strcasecmp(cmd, "acc") == 0) {
             current_stream_mode = STREAM_MODE_BOTH_ACC;
-            s_batch_sample_count = 0;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: BOTH ACCELEROMETERS (LOW-G + HIGH-G)");
         } else if (strcasecmp(cmd, "only_gyro") == 0 || strcasecmp(cmd, "gyro") == 0) {
             current_stream_mode = STREAM_MODE_ONLY_GYRO;
-            s_batch_sample_count = 0;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: GYROSCOPE ONLY");
         } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
             current_stream_mode = STREAM_MODE_ALL;
-            s_batch_sample_count = 0;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
 
@@ -791,6 +798,7 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                      "  Gyro Range:   range_gyro_{250dps|500dps|1000dps|2000dps|4000dps}",
                      cmd);
         }
+        xSemaphoreGiveRecursive(spi_mutex);
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -821,54 +829,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
     { 0 }, /* end of services */
 };
 
-/* ── BLE: send ASCII string notification ──────────────────────────────────── */
-static void __attribute__((unused)) imu_notify_str(const char *str)
-{
-    if (!ble_notify_enabled || ble_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        return;
-    }
-
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(str, strlen(str));
-    if (om == NULL) {
-        ESP_LOGW(TAG_BLE, "mbuf alloc failed — skipping notify");
-        return;
-    }
-
-    int rc = ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
-    if (rc != 0 && rc != BLE_HS_ENOTCONN) {
-        ESP_LOGW(TAG_BLE, "notify error: %d", rc);
-    }
-}
-
-/* ── BLE: send raw binary notification ────────────────────────────────────── */
-static bool imu_notify_bytes(const uint8_t *data, uint16_t len)
-{
-    if (!ble_notify_enabled || ble_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        return false;
-    }
-
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
-    if (om == NULL) {
-        ESP_LOGW(TAG_BLE, "mbuf alloc failed — dropping binary packet");
-        return false;
-    }
-
-    int rc = ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
-    if (rc != 0 && rc != BLE_HS_ENOTCONN) {
-        ESP_LOGW(TAG_BLE, "binary notify error: %d", rc);
-        return false;
-    }
-    if (rc == 0) {
-        s_notify_in_flight++;
-        return true;
-    }
-    return false;
-}
-
-/* ── 12-bit packing helpers ────────────────────────────────────────────────
- * Each 16-bit raw sample is shifted right 4 bits (sign-preserving) and the low
- * 12 bits are packed MSB-first into the batch payload. A 3-axis sample shrinks
- * from 6 bytes to 4.5 bytes, raising the BLE sample-rate ceiling by ~33%. */
+/* Binary batching and bounded transport. */
 #define PACKED_BITS_PER_AXIS 12
 
 static inline uint16_t pack_axis(int16_t raw)
@@ -878,67 +839,68 @@ static inline uint16_t pack_axis(int16_t raw)
     return (uint16_t)(raw >> 4) & 0x0FFFu;
 }
 
-static void pack_push(uint8_t *buf, uint32_t *bitpos, uint16_t value, unsigned nbits)
+static void imu_discard_pending(void)
 {
-    uint32_t pos = *bitpos;
-    for (int i = (int)nbits - 1; i >= 0; i--) {
-        if (value & (1u << i)) {
-            buf[pos >> 3] |= (uint8_t)(1u << (7u - (pos & 7u)));
-        }
-        pos++;
-    }
-    *bitpos = pos;
+    s_stats.discarded += imu_tx_clear(&s_tx_queue) + s_batch_sample_count;
+    s_batch_sample_count = 0;
+    s_batch_bitpos = 0;
+    s_next_tx_retry_us = 0;
 }
 
-/* ── Flush accumulated binary batch to BLE ────────────────────────────────── */
+static void imu_drain_tx(void)
+{
+    if (s_sensor_generation != s_stream_generation || g_data_paused ||
+        !ble_notify_enabled || ble_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        imu_discard_pending();
+        ulTaskNotifyTake(pdTRUE, 0);
+        s_sensor_generation = s_stream_generation;
+        return;
+    }
+    if (!s_tx_queue.count || esp_timer_get_time() < s_next_tx_retry_us) return;
+    imu_tx_packet_t *packet = &s_tx_queue.packets[s_tx_queue.head];
+    if (packet->len > imu_get_max_packet_bytes()) {
+        s_stats.discarded += packet->samples;
+        imu_tx_pop(&s_tx_queue);
+        return;
+    }
+    /* Accepted notifications have consecutive sequence numbers. */
+    ((imu_binary_header_t *)packet->data)->seq = s_batch_seq;
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(packet->data, packet->len);
+    int rc = om ? ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om)
+                : BLE_HS_ENOMEM;
+    /* notify_custom consumes the mbuf on success AND failure. */
+    if (rc == BLE_HS_ENOMEM || rc == BLE_HS_EAGAIN || rc == BLE_HS_EBUSY) {
+        s_stats.retries++;
+        s_next_tx_retry_us = esp_timer_get_time() + BLE_TX_RETRY_US;
+        return;
+    }
+    if (rc == 0) {
+        s_batch_seq++;
+        s_stats.submitted += packet->samples;
+        s_stats.bytes += packet->len;
+        s_stats.packets++;
+    } else {
+        s_stats.notify_errors++;
+        s_stats.discarded += packet->samples;
+    }
+    imu_tx_pop(&s_tx_queue);
+    s_next_tx_retry_us = 0;
+}
+
 static void imu_flush_batch(void)
 {
-    if (s_batch_sample_count == 0) {
-        return;
-    }
-
-    const uint8_t samples_to_send = s_batch_sample_count;
-    const uint16_t max_packet_bytes = imu_get_max_packet_bytes();
-    /* Bits are already packed; payload length = ceil(bitpos / 8). */
-    uint16_t total_len = (uint16_t)sizeof(imu_binary_header_t) + (uint16_t)((s_batch_bitpos + 7) / 8);
-
-    if (total_len > max_packet_bytes) {
-        /* Discard batch to prevent over-the-air payload truncation */
-        ESP_LOGW(TAG_BLE, "Batch total_len %u > max_packet_bytes %u, dropping batch", total_len, max_packet_bytes);
-        s_dropped_sample_count += samples_to_send;
-        s_batch_sample_count = 0;
-        s_batch_bitpos = 0;
-        return;
-    }
-
-    if (s_notify_in_flight >= MAX_BLE_NOTIFY_IN_FLIGHT) {
-        s_dropped_sample_count += samples_to_send;
-        s_batch_sample_count = 0;
-        s_batch_bitpos = 0;
-        return;
-    }
-
+    if (s_batch_sample_count == 0) return;
+    uint16_t total_len = sizeof(imu_binary_header_t) + (s_batch_bitpos + 7) / 8;
     imu_binary_header_t *hdr = (imu_binary_header_t *)s_batch_buf;
-    hdr->magic0       = BINARY_MAGIC_0;
-    hdr->magic1       = BINARY_MAGIC_1;
-    hdr->mode         = (uint8_t)current_stream_mode;
     hdr->sample_count = s_batch_sample_count;
-    hdr->xl_fs        = (uint8_t)g_xl_fs;
-    hdr->hg_fs        = (uint8_t)g_hg_fs;
-    hdr->gy_fs        = (uint8_t)g_gy_fs;
-    hdr->seq          = s_batch_seq++;
-    hdr->fmt          = BINARY_FMT_12BIT;
-
-    if (!imu_notify_bytes(s_batch_buf, total_len)) {
-        s_dropped_sample_count += samples_to_send;
+    if (!imu_tx_push(&s_tx_queue, s_batch_buf, total_len, s_batch_sample_count)) {
+        s_stats.overflow += s_batch_sample_count;
     }
-
     s_batch_sample_count = 0;
     s_batch_bitpos = 0;
     s_last_batch_send_time = esp_timer_get_time();
 }
 
-/* ── Accumulate one sensor sample tuple into batch buffer ─────────────────── */
 static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, const int16_t *raw_gy)
 {
     /* Axes packed per sample (3 per sensing path). */
@@ -951,7 +913,7 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
 
     const uint16_t max_packet_bytes = imu_get_max_packet_bytes();
     if (max_packet_bytes <= sizeof(imu_binary_header_t)) {
-        s_dropped_sample_count++;
+        s_stats.overflow++;
         return;
     }
 
@@ -962,7 +924,7 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
 
     if (max_samples == 0) {
         /* Not enough capacity for even one full sample tuple in this mode under current MTU */
-        s_dropped_sample_count++;
+        s_stats.overflow++;
         return;
     }
 
@@ -971,6 +933,12 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
         memset(&s_batch_buf[sizeof(imu_binary_header_t)], 0,
                sizeof(s_batch_buf) - sizeof(imu_binary_header_t));
         s_batch_bitpos = 0;
+        imu_binary_header_t *hdr = (imu_binary_header_t *)s_batch_buf;
+        *hdr = (imu_binary_header_t){
+            .magic0 = BINARY_MAGIC_0, .magic1 = BINARY_MAGIC_1,
+            .mode = current_stream_mode, .xl_fs = g_xl_fs,
+            .hg_fs = g_hg_fs, .gy_fs = g_gy_fs, .fmt = BINARY_FMT_12BIT,
+        };
     }
 
     uint8_t  *payload = &s_batch_buf[sizeof(imu_binary_header_t)];
@@ -978,29 +946,29 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
 
     switch (current_stream_mode) {
     case STREAM_MODE_LOW_ACC:
-        pack_push(payload, &bitpos, pack_axis(raw_lg[0]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_lg[1]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_lg[2]), PACKED_BITS_PER_AXIS);
+        imu_pack12(payload, &bitpos, pack_axis(raw_lg[0]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_lg[1]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_lg[2]));
         break;
     case STREAM_MODE_HIGH_ACC:
-        pack_push(payload, &bitpos, pack_axis(raw_hg[0]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_hg[1]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_hg[2]), PACKED_BITS_PER_AXIS);
+        imu_pack12(payload, &bitpos, pack_axis(raw_hg[0]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_hg[1]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_hg[2]));
         break;
     case STREAM_MODE_ONLY_GYRO:
-        pack_push(payload, &bitpos, pack_axis(raw_gy[0]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_gy[1]), PACKED_BITS_PER_AXIS);
-        pack_push(payload, &bitpos, pack_axis(raw_gy[2]), PACKED_BITS_PER_AXIS);
+        imu_pack12(payload, &bitpos, pack_axis(raw_gy[0]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_gy[1]));
+        imu_pack12(payload, &bitpos, pack_axis(raw_gy[2]));
         break;
     case STREAM_MODE_BOTH_ACC:
-        for (int a = 0; a < 3; a++) pack_push(payload, &bitpos, pack_axis(raw_lg[a]), PACKED_BITS_PER_AXIS);
-        for (int a = 0; a < 3; a++) pack_push(payload, &bitpos, pack_axis(raw_hg[a]), PACKED_BITS_PER_AXIS);
+        for (int a = 0; a < 3; a++) imu_pack12(payload, &bitpos, pack_axis(raw_lg[a]));
+        for (int a = 0; a < 3; a++) imu_pack12(payload, &bitpos, pack_axis(raw_hg[a]));
         break;
     case STREAM_MODE_ALL:
     default:
-        for (int a = 0; a < 3; a++) pack_push(payload, &bitpos, pack_axis(raw_lg[a]), PACKED_BITS_PER_AXIS);
-        for (int a = 0; a < 3; a++) pack_push(payload, &bitpos, pack_axis(raw_hg[a]), PACKED_BITS_PER_AXIS);
-        for (int a = 0; a < 3; a++) pack_push(payload, &bitpos, pack_axis(raw_gy[a]), PACKED_BITS_PER_AXIS);
+        for (int a = 0; a < 3; a++) imu_pack12(payload, &bitpos, pack_axis(raw_lg[a]));
+        for (int a = 0; a < 3; a++) imu_pack12(payload, &bitpos, pack_axis(raw_hg[a]));
+        for (int a = 0; a < 3; a++) imu_pack12(payload, &bitpos, pack_axis(raw_gy[a]));
         break;
     }
 
@@ -1045,6 +1013,12 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            s_stream_generation++;
+            s_diagnostics_enabled = false;
+            memset(s_diagnostics_snapshot, 0, sizeof(s_diagnostics_snapshot));
+            s_link_interval = 0;
+            s_link_tx_phy = s_link_rx_phy = 0;
+            s_link_tx_octets = 0;
             ble_npl_callout_stop(&ble_shutdown_callout);
             ble_conn_handle = event->connect.conn_handle;
             s_negotiated_mtu = BLE_ATT_MTU_DEFAULT;
@@ -1088,8 +1062,8 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
         ble_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
         ble_notify_enabled = false;
         s_negotiated_mtu   = BLE_ATT_MTU_DEFAULT;
-        s_batch_sample_count = 0;
-        s_notify_in_flight = 0;
+        s_stream_generation++;
+        s_diagnostics_enabled = false;
         xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
         status_led_update_streaming();
         ble_start_connection_timeout();
@@ -1098,6 +1072,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == imu_chr_val_handle) {
+            s_stream_generation++;
             ble_notify_enabled = (event->subscribe.cur_notify != 0);
             status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Notifications %s",
@@ -1107,14 +1082,31 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG_BLE, "MTU negotiated: %d bytes", event->mtu.value);
+        s_stream_generation++;
         s_negotiated_mtu = event->mtu.value;
         break;
 
-    case BLE_GAP_EVENT_NOTIFY_TX:
-        if (event->notify_tx.attr_handle == imu_chr_val_handle &&
-            !event->notify_tx.indication && s_notify_in_flight > 0) {
-            s_notify_in_flight--;
+    case BLE_GAP_EVENT_CONN_UPDATE: {
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(ble_conn_handle, &desc) == 0) {
+            s_link_interval = desc.conn_itvl;
+            ESP_LOGI(TAG_BLE, "Link interval=%.2f ms latency=%u",
+                     desc.conn_itvl * 1.25, desc.conn_latency);
         }
+        break;
+    }
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        if (event->phy_updated.status == 0) {
+            s_link_tx_phy = event->phy_updated.tx_phy;
+            s_link_rx_phy = event->phy_updated.rx_phy;
+            ESP_LOGI(TAG_BLE, "Link PHY tx=%u rx=%u (1=1M, 2=2M)",
+                     s_link_tx_phy, s_link_rx_phy);
+        }
+        break;
+    case BLE_GAP_EVENT_DATA_LEN_CHG:
+        s_link_tx_octets = event->data_len_chg.max_tx_octets;
+        ESP_LOGI(TAG_BLE, "Link data length tx=%u rx=%u",
+                 s_link_tx_octets, event->data_len_chg.max_rx_octets);
         break;
 
     default:
@@ -1186,6 +1178,7 @@ static void ble_on_reset(int reason)
 {
     ESP_LOGE(TAG_BLE, "NimBLE host reset (reason=%d)", reason);
     if (ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        s_stream_generation++;
         ble_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         ble_notify_enabled = false;
         xEventGroupClearBits(ble_event_group, BLE_CONNECTED_BIT);
@@ -1203,6 +1196,86 @@ static void nimble_host_task(void *param)
 }
 
 /* ── BLE: full stack initialisation ──────────────────────────────────────── */
+/* Diagnostic v1: 72 little-endian bytes, separate from AA55 sample packets. */
+static void diag_u32(uint8_t *p, uint32_t v)
+{
+    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+}
+static void diag_u16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+
+static void imu_publish_diagnostics(int64_t now_us)
+{
+    static int64_t last_snapshot_us;
+    if (!s_diagnostics_enabled || now_us - last_snapshot_us < 1000000LL) return;
+    last_snapshot_us = now_us;
+    uint8_t data[72] = {0xaa, 0x56, 1, current_stream_mode};
+    diag_u32(data + 4, (uint32_t)(now_us / 1000));
+    diag_u32(data + 8, s_stats.acquired);
+    diag_u32(data + 12, s_stats.submitted);
+    diag_u32(data + 16, s_stats.overflow);
+    diag_u32(data + 20, s_stats.discarded);
+    diag_u32(data + 24, s_stats.coalesced);
+    diag_u32(data + 28, s_stats.timeouts);
+    diag_u32(data + 32, s_stats.read_errors);
+    diag_u32(data + 36, s_stats.retries);
+    diag_u32(data + 40, s_stats.notify_errors);
+    diag_u32(data + 44, s_stats.bytes);
+    diag_u32(data + 48, s_stats.packets);
+    diag_u32(data + 52, s_tx_queue.samples + s_batch_sample_count);
+    diag_u16(data + 56, s_tx_queue.count);
+    diag_u16(data + 58, s_tx_queue.peak);
+    data[71] = g_data_paused ? 1 : 0;
+    /* Publish only complete sensor-task operations, never an intermediate
+     * enqueue/pop, so acquisition and transport counters can be compared. */
+    vTaskSuspendAll();
+    memcpy(s_diagnostics_snapshot, data, sizeof(data));
+    xTaskResumeAll();
+}
+
+static void ble_diagnostics_tick(struct ble_npl_event *event)
+{
+    (void)event;
+    static uint32_t last_overflow, last_errors;
+    if (s_stats.overflow != last_overflow || s_stats.notify_errors != last_errors) {
+        ESP_LOGW("STREAM", "Queue overflow dropped=%lu samples, permanent notify errors=%lu (since boot)",
+                 (unsigned long)s_stats.overflow, (unsigned long)s_stats.notify_errors);
+        last_overflow = s_stats.overflow;
+        last_errors = s_stats.notify_errors;
+    }
+    if (s_diagnostics_enabled && ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int8_t rssi = 127;
+        ble_gap_conn_rssi(ble_conn_handle, &rssi);
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(ble_conn_handle, &desc) == 0) s_link_interval = desc.conn_itvl;
+        if (!s_link_tx_phy) ble_gap_read_le_phy(ble_conn_handle, &s_link_tx_phy, &s_link_rx_phy);
+        uint8_t data[72];
+        vTaskSuspendAll();
+        memcpy(data, s_diagnostics_snapshot, sizeof(data));
+        xTaskResumeAll();
+        diag_u16(data + 60, os_msys_num_free());
+        diag_u16(data + 62, s_negotiated_mtu);
+        diag_u16(data + 64, s_link_interval);
+        diag_u16(data + 66, s_link_tx_octets);
+        data[68] = (uint8_t)rssi;
+        data[69] = s_link_tx_phy;
+        data[70] = s_link_rx_phy;
+        /* Best effort: never queue diagnostics ahead of sensor data. */
+        if (data[0] == 0xaa && imu_get_max_packet_bytes() >= sizeof(data)) {
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(data, sizeof(data));
+            if (om) ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
+        }
+        snprintf(latest_ble_str, sizeof(latest_ble_str),
+                 "acquired=%lu submitted=%lu overflow=%lu coalesced=%lu retries=%lu pending=%lu",
+                 (unsigned long)s_stats.acquired, (unsigned long)s_stats.submitted,
+                 (unsigned long)s_stats.overflow, (unsigned long)s_stats.coalesced,
+                 (unsigned long)s_stats.retries, (unsigned long)s_tx_queue.samples);
+        ESP_LOGI("STREAM", "%s RSSI=%d MTU=%u interval=%.2fms PHY=%u/%u DLE=%u",
+                 latest_ble_str, rssi, s_negotiated_mtu, s_link_interval * 1.25,
+                 s_link_tx_phy, s_link_rx_phy, s_link_tx_octets);
+    }
+    ble_npl_callout_reset(&s_diagnostics_callout, ble_npl_time_ms_to_ticks32(2000));
+}
+
 static void ble_stack_init(void)
 {
     /* Suppress verbose NimBLE procedure logs (e.g. notify procedure initiation on every packet) */
@@ -1240,6 +1313,9 @@ static void ble_stack_init(void)
     ble_npl_callout_init(&ble_shutdown_callout, nimble_port_get_dflt_eventq(),
                          ble_connection_timeout, NULL);
     ble_start_connection_timeout();
+    ble_npl_callout_init(&s_diagnostics_callout, nimble_port_get_dflt_eventq(),
+                         ble_diagnostics_tick, NULL);
+    ble_npl_callout_reset(&s_diagnostics_callout, ble_npl_time_ms_to_ticks32(2000));
     nimble_port_freertos_init(nimble_host_task);
 }
 
@@ -1308,6 +1384,7 @@ static void sensor_task(void *arg)
 
     /* Initialise timing and route DRDY to INT1 (GPIO10) based on current stream mode */
     odr_recompute_timing();
+    sensor_ready = true;
 
 #if USE_BLE
     ESP_LOGI(TAG, "Sensor ready (Low-G + High-G + Gyro). Waiting for BLE connection...");
@@ -1336,6 +1413,8 @@ static void sensor_task(void *arg)
 
         /* ── Gate: pause until a BLE central is connected ─────────────── */
 #if USE_BLE
+        imu_publish_diagnostics(loop_now_us);
+        imu_drain_tx();
         if (!(xEventGroupGetBits(ble_event_group) & BLE_CONNECTED_BIT)) {
             static bool disconn_logged = false;
             if (!disconn_logged) {
@@ -1359,60 +1438,69 @@ static void sensor_task(void *arg)
         }
 
         /* ── Gate: paused by command ──────────────────────────────────── */
-        if (g_data_paused) {
+        if (g_data_paused || !ble_notify_enabled) {
+            imu_discard_pending();
             vTaskDelay(pdMS_TO_TICKS(50));
             /* Clear any accumulated notification so resuming starts cleanly */
             ulTaskNotifyTake(pdTRUE, 0);
-            s_batch_sample_count = 0;
             continue;
         }
 #endif
 
         /* ── Wait for INT1 data-ready interrupt ───────────────────────── */
         /* Timeout = 5× the period of the slowest active sensor (dynamic) */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(g_drdy_timeout_ms));
-
-        /* (No memset needed here — only the sensors actually read get packed.) */
-
-        /* Read active sensors based on selected stream mode */
+        TickType_t wait_ticks = pdMS_TO_TICKS(g_drdy_timeout_ms);
+#if USE_BLE
+        bool retry_wait = s_tx_queue.count > 0;
+        if (retry_wait) wait_ticks = 1; /* Keep retrying even at a low sensor ODR. */
+#endif
+        uint32_t ready_count = ulTaskNotifyTake(pdTRUE, wait_ticks);
+        if (!ready_count) {
+#if USE_BLE
+            if (!retry_wait) s_stats.timeouts++;
+#endif
+            continue; /* A timeout is not a new sensor sample. */
+        }
+        xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
+#if USE_BLE
+        if (s_sensor_generation != s_stream_generation) {
+            imu_discard_pending();
+            s_sensor_generation = s_stream_generation;
+            ulTaskNotifyTake(pdTRUE, 0);
+            xSemaphoreGiveRecursive(spi_mutex);
+            continue;
+        }
+        if (g_data_paused || !ble_notify_enabled) {
+            xSemaphoreGiveRecursive(spi_mutex);
+            continue;
+        }
+        s_stats.coalesced += ready_count - 1;
+#endif
+        int32_t read_rc = 0;
         if (current_stream_mode == STREAM_MODE_LOW_ACC || current_stream_mode == STREAM_MODE_BOTH_ACC || current_stream_mode == STREAM_MODE_ALL) {
-            lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+            read_rc |= lsm6dsv320x_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
         }
         if (current_stream_mode == STREAM_MODE_HIGH_ACC || current_stream_mode == STREAM_MODE_BOTH_ACC || current_stream_mode == STREAM_MODE_ALL) {
-            lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
+            read_rc |= lsm6dsv320x_hg_acceleration_raw_get(&dev_ctx, data_raw_hg_acceleration);
         }
         if (current_stream_mode == STREAM_MODE_ONLY_GYRO || current_stream_mode == STREAM_MODE_ALL) {
-            lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
+            read_rc |= lsm6dsv320x_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
         }
-
+        if (read_rc != 0) {
 #if USE_BLE
-        /* Accumulate raw sample into batch buffer (auto-flushes if full or >= 30 ms) */
+            s_stats.read_errors++;
+#endif
+            xSemaphoreGiveRecursive(spi_mutex);
+            continue;
+        }
+#if USE_BLE
+        s_stats.acquired++;
         imu_accumulate_sample(data_raw_acceleration, data_raw_hg_acceleration, data_raw_angular_rate);
-
-        /* Flush on timeout if any samples pending and >= 30 ms */
-        int64_t now = esp_timer_get_time();
-        if (s_batch_sample_count > 0 && (now - s_last_batch_send_time >= 30000LL)) {
-            imu_flush_batch();
-        }
-
-        /* Report backpressure at most once per second, rather than flooding the
-         * serial log for every dropped batch. */
-        if (s_dropped_sample_count > 0 && now - s_last_drop_report_time >= 1000000LL) {
-            ESP_LOGW(TAG_BLE, "BLE backpressure: dropped %lu samples in the last interval",
-                     (unsigned long)s_dropped_sample_count);
-            s_dropped_sample_count = 0;
-            s_last_drop_report_time = now;
-        }
-
-        /* Periodically update latest_ble_str for GATT Read (every 1s) */
-        static int64_t last_status_update = 0;
-        if (now - last_status_update >= 1000000LL) {
-            last_status_update = now;
-            snprintf(latest_ble_str, sizeof(latest_ble_str),
-                     "ESP_IMU Binary: mode=%d count=%u seq=%u\r\n",
-                     current_stream_mode, s_batch_sample_count, s_batch_seq);
-        }
+        xSemaphoreGiveRecursive(spi_mutex);
+        /* Never call NimBLE with the SPI/configuration mutex held. */
+        imu_drain_tx();
 #else
+        xSemaphoreGiveRecursive(spi_mutex);
         /* ALL mode is the default without BLE commands. Keep sampling at the
          * configured sensor rates and print one snapshot per second. */
         int64_t now = esp_timer_get_time();
