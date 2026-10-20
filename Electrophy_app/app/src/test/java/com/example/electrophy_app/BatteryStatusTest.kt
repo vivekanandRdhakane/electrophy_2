@@ -6,7 +6,7 @@ import org.junit.Test
 class BatteryStatusTest {
     @Test fun decodesLittleEndianVoltage() {
         val status = BatteryStatusDecoder.decode(byteArrayOf(0xAA.toByte(), 0x57, 1, 0x06, 0x0F))
-        assertEquals(BatteryStatus(3846, 49), status)
+        assertEquals(BatteryStatus(3846, 81), status)
     }
 
     @Test fun rejectsInvalidFramesAndUnavailableReading() {
@@ -28,6 +28,28 @@ class BatteryStatusTest {
             assertTrue(percent in previous..100)
             previous = percent
         }
+    }
+
+    @Test fun fitsMeasuredRuntimeMilestones() {
+        // Voltages inferred from the OLD mapping, paired with elapsed minutes.
+        val milestones = listOf(
+            4020 to 0.0, 3830 to 10.0, 3680 to 20.0,
+            3560 to 30.0, 3340 to 47.0, 3300 to 48.0
+        )
+        for ((mv, minutes) in milestones) {
+            val remaining = 100.0 * (1.0 - minutes / 48.25)
+            assertEquals("At $minutes minutes", remaining,
+                BatteryStatusDecoder.percentage(mv).toDouble(), 1.0)
+        }
+        assertEquals(100, BatteryStatusDecoder.percentage(4020))
+        assertEquals(100, BatteryStatusDecoder.percentage(4300))
+    }
+
+    @Test fun repeatedReadingsUseMidpointTimeAndInterpolate() {
+        // Old 4% was recorded at minutes 38, 39, 40, 41: midpoint 39.5.
+        assertEquals(18, BatteryStatusDecoder.percentage(3460))
+        // Halfway between calibrated 3380 mV / 6% and 3420 mV / 11%.
+        assertEquals(9, BatteryStatusDecoder.percentage(3400))
     }
 
     @Test fun statusDoesNotShowOldBatteryWhenDisconnected() {

@@ -45,11 +45,13 @@ Zero voltage means unavailable. IMU packets remain unchanged.
 The Android app shows `Connected · N%` on the main and experiment screens.
 An unavailable reading, older firmware, or no battery frame for ten seconds
 shows `Connected · --%`; disconnect/reconnect clears the previous reading.
-`BatteryStatus.kt` interpolates an approximate standard 4.2 V LiPo curve:
-3.30 V = 0%, 3.70 V = 20%, 3.85 V = 50%, 4.00 V = 75%, 4.20 V = 100%.
-These are estimates of usable charge above the chosen cutoff, not a calibrated
-fuel gauge. The 40 mAh capacity alone does not specify the voltage curve;
-load, temperature, cell aging, and charging affect it.
+`BatteryStatus.kt` interpolates an empirical remaining-runtime curve from the
+user's 48-minute-15-second discharge test: 4.02 V = 100%, 3.70 V = 63%,
+3.60 V = 44%, 3.50 V = 24%, and 3.30 V = 0%.
+Voltages were inferred from the old displayed percentages, not measured directly.
+This estimates usable runtime under similar load, not independently measured
+state of charge. Load, temperature, aging, and charging affect it.
+See [calibration data and method](../Electrophy_app/BATTERY_CALIBRATION.md).
 
 Bench validation before use:
 
