@@ -63,6 +63,7 @@
 #endif
 
 #include "lsm6dsv320x_reg.h"
+#include "battery_monitor.h"
 
 /* ── Pin definitions ──────────────────────────────────────────────────────── */
 #define PIN_SCLK    GPIO_NUM_4
@@ -1447,6 +1448,14 @@ static uint32_t diag_read_u32(const uint8_t *p)
 static void ble_diagnostics_tick(struct ble_npl_event *event)
 {
     (void)event;
+    /* Independent of diagnostics and stream pause. AA57 v1 + battery mV LE.
+     * Runs on the host queue so connection/disconnect events are serialized. */
+    if (ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        uint16_t mv = battery_monitor_mv();
+        uint8_t battery[] = {0xaa, 0x57, 1, (uint8_t)mv, (uint8_t)(mv >> 8)};
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(battery, sizeof(battery));
+        if (om) ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
+    }
     static uint32_t last_overflow, last_errors, last_fifo_overruns;
     if (s_fifo_overruns != last_fifo_overruns) {
         ESP_LOGW("FIFO", "Hardware overrun observations=%lu; lost sample count unknown",
@@ -1901,6 +1910,7 @@ static void status_led_start_breathing(void)
 void app_main(void)
 {
     board_power_and_led_init();
+    battery_monitor_start(PIN_POWER_HOLD);
     /* Yield before starting BLE or the sensor task so USB can enumerate and
      * a monitor can attach before a possible task failure. */
     vTaskDelay(pdMS_TO_TICKS(3000));

@@ -19,6 +19,54 @@ a disconnect. A successful connection cancels the timeout; notification
 subscription is not required. Adjust `BLE_CONNECT_TIMEOUT_MS` in `main/main.c`
 to change the timeout. This automatic shutdown is disabled with `USE_BLE=0`.
 
+## Battery monitoring
+
+GPIO3 (ADC1 channel 3) measures the midpoint of the 100k/100k battery divider.
+The monitor uses ESP32-C3 curve-fitting ADC calibration and 12 dB attenuation,
+averages 16 conversions spaced one RTOS tick apart, and multiplies the measured
+pin voltage by two. Each measurement is followed by a one-second sleep.
+Monitoring starts before BLE/sensor initialization and works with `USE_BLE=0`,
+while disconnected, and while streaming is paused.
+
+Three consecutive measurements below **3300 mV** release GPIO21 POWER_HOLD.
+With the current 100 Hz RTOS tick, confirmation takes approximately 2.5–3.7
+seconds after crossing the threshold. A recovered reading resets confirmation.
+Change `BATTERY_CUTOFF_MV` and `BATTERY_LOW_READINGS` in
+`main/battery_monitor.h` to tune this. Initialization/calibration failure or
+three consecutive read failures also release power hold rather than operate
+without monitoring. USB or a held power button may keep the board powered;
+the monitor never reasserts power hold after a shutdown decision.
+
+BLE sends a five-byte battery frame on the existing NUS TX characteristic
+every two seconds when subscribed, independent of stream pause and diagnostics:
+`AA 57 01 <battery_mV low byte> <battery_mV high byte>`.
+Zero voltage means unavailable. IMU packets remain unchanged.
+
+The Android app shows `Connected · N%` on the main and experiment screens.
+An unavailable reading, older firmware, or no battery frame for ten seconds
+shows `Connected · --%`; disconnect/reconnect clears the previous reading.
+`BatteryStatus.kt` interpolates an approximate standard 4.2 V LiPo curve:
+3.30 V = 0%, 3.70 V = 20%, 3.85 V = 50%, 4.00 V = 75%, 4.20 V = 100%.
+These are estimates of usable charge above the chosen cutoff, not a calibrated
+fuel gauge. The 40 mAh capacity alone does not specify the voltage curve;
+load, temperature, cell aging, and charging affect it.
+
+Bench validation before use:
+
+- Compare reported millivolts with a meter at several battery voltages,
+  especially 3.3 V and 4.2 V. The high-impedance divider can affect ADC accuracy;
+  check whether a 100 nF capacitor from GPIO3 to ground is fitted.
+- With a current-limited supply replacing the cell, verify GPIO21 goes low
+  below 3.3 V after three readings, and short dips do not shut it down.
+- Repeat while paused, disconnected, and streaming at maximum ODR. Check
+  percentage updates and disconnect/reconnect behavior in both app screens.
+- Confirm the cell manufacturer's cutoff and discharge curve before tuning
+  the constants. Firmware shutdown supplements the cell protection circuit;
+  it does not disconnect a divider wired directly across the battery.
+
+References: [Espressif ADC oneshot and calibration](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32c3/api-reference/peripherals/adc_oneshot.html),
+[standard LiPo voltage behavior](https://learn.adafruit.com/li-ion-and-lipoly-batteries/voltages).
+
 ## Streaming performance and diagnostics
 
 Binary samples keep the existing AA55 / 12-bit packet format. Temporary NimBLE

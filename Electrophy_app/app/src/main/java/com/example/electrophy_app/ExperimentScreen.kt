@@ -48,6 +48,7 @@ fun ExperimentScreen(
     onBack: () -> Unit,
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
+    val batteryStatus by viewModel.batteryStatus.collectAsState()
     val chartData by viewModel.chartData.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
@@ -217,7 +218,7 @@ fun ExperimentScreen(
                     }
                     SuggestionChip(
                         onClick = { },
-                        label = { Text(connectionState.name) },
+                        label = { Text(connectionStatusLabel(connectionState, batteryStatus)) },
                         colors = SuggestionChipDefaults.suggestionChipColors(
                             containerColor = color.copy(alpha = 0.2f),
                             labelColor = color

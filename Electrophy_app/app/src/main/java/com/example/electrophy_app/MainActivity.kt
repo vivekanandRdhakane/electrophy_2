@@ -186,6 +186,9 @@ val gyroOdrOptions = listOf(
 class BleViewModel : ViewModel() {
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
+    private val _batteryStatus = MutableStateFlow<BatteryStatus?>(null)
+    val batteryStatus: StateFlow<BatteryStatus?> = _batteryStatus
+    @Volatile private var lastBatteryMs = 0L
 
     private var sessionStartTimeMs = System.currentTimeMillis()
     private var lastAssignedTimeMs = 0L
@@ -699,6 +702,7 @@ class BleViewModel : ViewModel() {
         override fun run() {
             if (_connectionState.value != ConnectionState.Connected) return
             val now = SystemClock.elapsedRealtime()
+            if (now - lastBatteryMs > 10000L) _batteryStatus.value = null
             val metrics = receiveMeter.snapshot(now)
             _receiveMetrics.value = metrics
             _receivedSamplesPerSecond.value = metrics.samplesPerSecond
@@ -734,6 +738,7 @@ class BleViewModel : ViewModel() {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Connecting
                 bluetoothGatt = gatt
                 mainHandler.post {
@@ -751,6 +756,7 @@ class BleViewModel : ViewModel() {
                 )
                 gatt.requestMtu(PREFERRED_BLE_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Disconnected
                 _isPaused.value = false
                 _receivedSamplesPerSecond.value = 0
@@ -878,6 +884,11 @@ class BleViewModel : ViewModel() {
     }
 
     private fun handleIncomingData(value: ByteArray) {
+        if (BatteryStatusDecoder.isBatteryFrame(value)) {
+            lastBatteryMs = SystemClock.elapsedRealtime()
+            _batteryStatus.value = BatteryStatusDecoder.decode(value)
+            return
+        }
         if (StreamDiagnosticsDecoder.isDiagnostic(value)) {
             val frame = StreamDiagnosticsDecoder.decode(value) ?: return
             if (_diagnosticsEnabled.value) {
@@ -1157,6 +1168,7 @@ class BleViewModel : ViewModel() {
         Handler(Looper.getMainLooper()).postDelayed({
             if (_connectionState.value == ConnectionState.Scanning) {
                 stopScan()
+                _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Disconnected
             }
         }, 10000)
@@ -1168,6 +1180,7 @@ class BleViewModel : ViewModel() {
 
     private fun connectToDevice(device: BluetoothDevice) {
         val ctx = context ?: return
+        _batteryStatus.value = null
         _connectionState.value = ConnectionState.Connecting
         device.connectGatt(ctx, false, gattCallback)
     }
@@ -1181,6 +1194,7 @@ class BleViewModel : ViewModel() {
             isGattBusy = false
         }
         bluetoothGatt?.disconnect()
+        _batteryStatus.value = null
         _connectionState.value = ConnectionState.Disconnected
         _receivedSamplesPerSecond.value = 0
         _firmwareDiagnostics.value = null
@@ -1573,6 +1587,7 @@ fun BleAppScreen(
     val context = LocalContext.current
 
     val connectionState by viewModel.connectionState.collectAsState()
+    val batteryStatus by viewModel.batteryStatus.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
     val diagnosticsEnabled by viewModel.diagnosticsEnabled.collectAsState()
@@ -1704,7 +1719,7 @@ fun BleAppScreen(
                     }
                     SuggestionChip(
                         onClick = { },
-                        label = { Text(connectionState.name) },
+                        label = { Text(connectionStatusLabel(connectionState, batteryStatus)) },
                         colors = SuggestionChipDefaults.suggestionChipColors(
                             containerColor = color.copy(alpha = 0.2f),
                             labelColor = color
