@@ -21,8 +21,34 @@
  *                "[mg] X=%7.2f Y=%7.2f Z=%7.2f [mdps] X=%8.2f Y=%8.2f Z=%8.2f"
  */
 
+/* Assembly tests: set exactly one to 1, then rebuild/flash.
+ * Both 0 = normal firmware. Controller test prints over USB D+/D-.
+ * BLE test sends ASCII dummy data on ESP_IMU's NUS TX characteristic.
+ */
+#ifndef ONLY_CONTROLLER_TESTING
+#define ONLY_CONTROLLER_TESTING 0
+#endif
+#ifndef ONLY_BLE_TESTING
+#define ONLY_BLE_TESTING 0
+#endif
+#if (ONLY_CONTROLLER_TESTING != 0 && ONLY_CONTROLLER_TESTING != 1) || \
+    (ONLY_BLE_TESTING != 0 && ONLY_BLE_TESTING != 1)
+#error "Assembly test macros must be 0 or 1"
+#endif
+#if ONLY_CONTROLLER_TESTING && ONLY_BLE_TESTING
+#error "Enable only one assembly test at a time"
+#endif
+
 /* Set to 0 for sensor debugging without BLE; rebuild after changing. */
 #ifndef USE_BLE
+#define USE_BLE 1
+#endif
+/* Assembly tests override the normal BLE switch. */
+#if ONLY_CONTROLLER_TESTING
+#undef USE_BLE
+#define USE_BLE 0
+#elif ONLY_BLE_TESTING
+#undef USE_BLE
 #define USE_BLE 1
 #endif
 #if USE_BLE != 0 && USE_BLE != 1
@@ -566,7 +592,11 @@ static void int1_gpio_init(void)
 
 /* Cache of latest string for GATT Read */
 #if USE_BLE
+#if ONLY_BLE_TESTING
+static char latest_ble_str[256] = "BLE dummy test\r\n";
+#else
 static char latest_ble_str[256] = "Sensor initializing...\r\n";
+#endif
 
 /* ── BLE: GATT characteristic access callback ─────────────────────────────── */
 static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -1048,6 +1078,7 @@ static void ble_connection_timeout(struct ble_npl_event *event)
 
 static void ble_start_connection_timeout(void)
 {
+    if (ONLY_BLE_TESTING) return; /* Allow unlimited time for RF bring-up. */
     int rc = ble_npl_callout_reset(&ble_shutdown_callout,
                                   ble_npl_time_ms_to_ticks32(BLE_CONNECT_TIMEOUT_MS));
     ESP_ERROR_CHECK(rc);
@@ -1448,6 +1479,26 @@ static uint32_t diag_read_u32(const uint8_t *p)
 static void ble_diagnostics_tick(struct ble_npl_event *event)
 {
     (void)event;
+#if ONLY_BLE_TESTING
+    /* Host queue serializes this with GATT reads and connection events.
+     * The 19-byte payload fits the default ATT MTU (23) without negotiation. */
+    static unsigned long sequence;
+    if (ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int len = snprintf(latest_ble_str, sizeof(latest_ble_str),
+                           "BLE TEST %08lu\r\n", sequence % 100000000UL);
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(latest_ble_str, len);
+        int rc = om ? ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om)
+                    : BLE_HS_ENOMEM;
+        /* notify_custom consumes the mbuf on success and failure. */
+        if (rc == 0) {
+            ESP_LOGI(TAG_BLE, "Dummy packet %lu submitted", sequence++);
+        } else {
+            ESP_LOGW(TAG_BLE, "Dummy notification failed: %d", rc);
+        }
+    }
+    ble_npl_callout_reset(&s_diagnostics_callout, ble_npl_time_ms_to_ticks32(1000));
+    return;
+#endif
     /* Independent of diagnostics and stream pause. AA57 v1 + battery mV LE.
      * Runs on the host queue so connection/disconnect events are serialized. */
     if (ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
@@ -1910,7 +1961,15 @@ static void status_led_start_breathing(void)
 void app_main(void)
 {
     board_power_and_led_init();
-    battery_monitor_start(PIN_POWER_HOLD);
+    if (ONLY_CONTROLLER_TESTING) {
+        unsigned long heartbeat = 0;
+        while (1) {
+            printf("CONTROLLER TEST: alive %lu (USB console)\n", heartbeat++);
+            fflush(stdout);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    if (!ONLY_BLE_TESTING) battery_monitor_start(PIN_POWER_HOLD);
     /* Yield before starting BLE or the sensor task so USB can enumerate and
      * a monitor can attach before a possible task failure. */
     vTaskDelay(pdMS_TO_TICKS(3000));
@@ -1935,6 +1994,11 @@ void app_main(void)
 #if USE_BLE
     ble_stack_init();
 #endif
+
+    if (ONLY_BLE_TESTING) {
+        ESP_LOGI(TAG, "BLE test: connect to ESP_IMU and subscribe to NUS TX; sensor disabled");
+        return; /* Dummy notifications run on the NimBLE host callout. */
+    }
 
     /* Start sensor task — handles SPI + INT1 + BLE notify */
     xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
