@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -108,6 +109,7 @@ data class RangeOption(val label: String, val suffix: String)
 data class TimeWindowOption(val label: String, val seconds: Float)
 
 val timeWindowOptions = listOf(
+    TimeWindowOption("2 ms", 0.002f),
     TimeWindowOption("5 ms", 0.005f),
     TimeWindowOption("10 ms", 0.010f),
     TimeWindowOption("30 ms", 0.030f),
@@ -190,6 +192,10 @@ val gyroOdrOptions = listOf(
 class BleViewModel : ViewModel() {
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
+    private val _connectedDevice = MutableStateFlow<String?>(null)
+    val connectedDevice: StateFlow<String?> = _connectedDevice
+    private val _connectedDeviceName = MutableStateFlow<String?>(null)
+    val connectedDeviceName: StateFlow<String?> = _connectedDeviceName
     private val _availableDevices = MutableStateFlow<List<DiscoveredElectrophy>>(emptyList())
     val availableDevices: StateFlow<List<DiscoveredElectrophy>> = _availableDevices
     private var scanGeneration = 0
@@ -197,8 +203,11 @@ class BleViewModel : ViewModel() {
     val batteryStatus: StateFlow<BatteryStatus?> = _batteryStatus
     @Volatile private var lastBatteryMs = 0L
 
-    private var sessionStartTimeMs = System.currentTimeMillis()
-    private var lastAssignedTimeMs = 0L
+    private var sessionStartNanos = SystemClock.elapsedRealtimeNanos()
+    private var lastAssignedTimeMs = 0.0
+    @Volatile private var lastSamplePacketArrivalMs: Long? = null
+    private val _lastSampleArrivalMs = MutableStateFlow<Long?>(null)
+    val lastSampleArrivalMs: StateFlow<Long?> = _lastSampleArrivalMs
     private var lastTerminalUpdateTimeMs = 0L
     private val receiveMeter = ReceiveRateMeter()
     private val firmwareRateTracker = FirmwareRateTracker()
@@ -223,8 +232,10 @@ class BleViewModel : ViewModel() {
     }
 
     private fun resetSession() {
-        sessionStartTimeMs = System.currentTimeMillis()
-        lastAssignedTimeMs = 0L
+        sessionStartNanos = SystemClock.elapsedRealtimeNanos()
+        lastAssignedTimeMs = 0.0
+        lastSamplePacketArrivalMs = null
+        _lastSampleArrivalMs.value = null
         lastTerminalUpdateTimeMs = 0L
         receiveMeter.reset(SystemClock.elapsedRealtime())
         firmwareRateTracker.reset()
@@ -234,6 +245,7 @@ class BleViewModel : ViewModel() {
         _firmwareRates.value = null
         _receiveMetrics.value = ReceiveMetrics(0, 0, 0, 0)
         _receivedSamplesPerSecond.value = 0
+        _lastActiveSamplesPerSecond.value = 0
         resetFilterState()
         _isCalibrating.value = false
         _calibrationProgress.value = 0f
@@ -356,6 +368,7 @@ class BleViewModel : ViewModel() {
     val autoTriggerDelayMs: StateFlow<Long> = _autoTriggerDelayMs
 
     private var isTriggerPending = false
+    var onAutoTriggerCapture: (() -> Unit)? = null
     private var baselineX = 0f; private var baselineY = 0f; private var baselineZ = 0f; private var isBaselineInitialized = false
 
     fun setAutoTriggerEnabled(enabled: Boolean) {
@@ -430,6 +443,7 @@ class BleViewModel : ViewModel() {
                     togglePause()
                     Log.i(BLE_TAG, "Auto-trigger pause executed.")
                 }
+                onAutoTriggerCapture?.invoke()
                 isTriggerPending = false
             }, delay)
         }
@@ -440,6 +454,8 @@ class BleViewModel : ViewModel() {
 
     private val _receivedSamplesPerSecond = MutableStateFlow(0)
     val receivedSamplesPerSecond: StateFlow<Int> = _receivedSamplesPerSecond
+    private val _lastActiveSamplesPerSecond = MutableStateFlow(0)
+    val lastActiveSamplesPerSecond: StateFlow<Int> = _lastActiveSamplesPerSecond
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording
@@ -476,6 +492,12 @@ class BleViewModel : ViewModel() {
         val nextState = !_isPaused.value
         _isPaused.value = nextState
         if (nextState) {
+            _lastSampleArrivalMs.value = lastSamplePacketArrivalMs
+            _chartData.value = ChartData(
+                lowG = lowGBuffer.getPoints(),
+                highG = highGBuffer.getPoints(),
+                gyro = gyroBuffer.getPoints()
+            )
             sendCommand("pause")
         } else {
             sendCommand("resume")
@@ -713,6 +735,9 @@ class BleViewModel : ViewModel() {
             val metrics = receiveMeter.snapshot(now)
             _receiveMetrics.value = metrics
             _receivedSamplesPerSecond.value = metrics.samplesPerSecond
+            if (!_isPaused.value && metrics.samplesPerSecond > 0) {
+                _lastActiveSamplesPerSecond.value = metrics.samplesPerSecond
+            }
             if (now - lastDiagnosticsMs > 6000L) {
                 _firmwareDiagnostics.value = null
                 _firmwareRates.value = null
@@ -745,6 +770,10 @@ class BleViewModel : ViewModel() {
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (gatt.device.address != _connectedDevice.value) {
+                gatt.close()
+                return
+            }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Connecting
@@ -765,9 +794,12 @@ class BleViewModel : ViewModel() {
                 gatt.requestMtu(PREFERRED_BLE_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _batteryStatus.value = null
+                _connectedDevice.value = null
+                _connectedDeviceName.value = null
                 _connectionState.value = ConnectionState.Disconnected
                 _isPaused.value = false
                 _receivedSamplesPerSecond.value = 0
+                _lastActiveSamplesPerSecond.value = 0
                 _firmwareDiagnostics.value = null
                 _firmwareRates.value = null
                 mainHandler.post {
@@ -925,10 +957,12 @@ class BleViewModel : ViewModel() {
         }
 
         receiveMeter.record(decoded.sampleCount, decoded.seq)
-        val rawNowMs = System.currentTimeMillis() - sessionStartTimeMs
-        val nowMs = if (rawNowMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawNowMs
-        val dt = (nowMs - lastAssignedTimeMs).toFloat() / decoded.sampleCount.coerceAtLeast(1)
-        val baseTime = lastAssignedTimeMs
+        lastSamplePacketArrivalMs = SystemClock.elapsedRealtime()
+        val rawNowMs = (SystemClock.elapsedRealtimeNanos() - sessionStartNanos) / 1_000_000.0
+        // Keep timestamps ordered without adding artificial 20 ms per BLE packet.
+        val nowMs = maxOf(rawNowMs, lastAssignedTimeMs + 0.001)
+        val dt = ((nowMs - lastAssignedTimeMs) / decoded.sampleCount.coerceAtLeast(1)).toFloat()
+        val baseTime = lastAssignedTimeMs.toFloat()
         lastAssignedTimeMs = nowMs
 
         val lowGList = decoded.lowG.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
@@ -1075,6 +1109,7 @@ class BleViewModel : ViewModel() {
         val chartNow = SystemClock.elapsedRealtime()
         if (chartNow - lastChartUpdateMs >= 50L) {
             lastChartUpdateMs = chartNow
+            _lastSampleArrivalMs.value = lastSamplePacketArrivalMs
             _chartData.value = ChartData(
                 lowG = lowGBuffer.getPoints(),
                 highG = highGBuffer.getPoints(),
@@ -1161,7 +1196,7 @@ class BleViewModel : ViewModel() {
         _calibrationOffsets.value = loadCalibrationFromPrefs()
     }
 
-    fun startScan() {
+    fun startScan(excludedAddress: String? = null) {
         val ctx = context ?: return
         val bluetoothManager = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = bluetoothManager.adapter
@@ -1180,8 +1215,10 @@ class BleViewModel : ViewModel() {
                 stopScan()
                 _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Disconnected
-                if (_availableDevices.value.size == 1) {
-                    connectToDevice(_availableDevices.value.single().device)
+                val candidates = _availableDevices.value.filter { it.device.address != excludedAddress }
+                _availableDevices.value = candidates
+                if (candidates.size == 1) {
+                    connectToDevice(candidates.single())
                 }
             }
         }, BLE_SCAN_DURATION_MS)
@@ -1190,8 +1227,13 @@ class BleViewModel : ViewModel() {
     fun selectDevice(device: DiscoveredElectrophy) {
         if (_connectionState.value != ConnectionState.Disconnected ||
             _availableDevices.value.none { it.device.address == device.device.address }) return
+        connectDiscoveredDevice(device)
+    }
+
+    fun connectDiscoveredDevice(device: DiscoveredElectrophy) {
+        if (_connectionState.value != ConnectionState.Disconnected) return
         _availableDevices.value = emptyList()
-        connectToDevice(device.device)
+        connectToDevice(device)
     }
 
     fun dismissDeviceList() {
@@ -1203,16 +1245,25 @@ class BleViewModel : ViewModel() {
         scanner?.stopScan(scanCallback)
     }
 
-    private fun connectToDevice(device: BluetoothDevice) {
+    private fun connectToDevice(discovered: DiscoveredElectrophy) {
         val ctx = context ?: return
         _batteryStatus.value = null
+        _connectedDevice.value = discovered.device.address
+        _connectedDeviceName.value = discovered.name
         _connectionState.value = ConnectionState.Connecting
-        device.connectGatt(ctx, false, gattCallback)
+        bluetoothGatt = discovered.device.connectGatt(ctx, false, gattCallback)
+        if (bluetoothGatt == null) {
+            _connectedDevice.value = null
+            _connectedDeviceName.value = null
+            _connectionState.value = ConnectionState.Disconnected
+        }
     }
 
     fun disconnect() {
         stopScan()
         _availableDevices.value = emptyList()
+        _connectedDevice.value = null
+        _connectedDeviceName.value = null
         _isPaused.value = false
         mainHandler.post {
             mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
@@ -1223,6 +1274,7 @@ class BleViewModel : ViewModel() {
         _batteryStatus.value = null
         _connectionState.value = ConnectionState.Disconnected
         _receivedSamplesPerSecond.value = 0
+        _lastActiveSamplesPerSecond.value = 0
         _firmwareDiagnostics.value = null
         _firmwareRates.value = null
         mainHandler.removeCallbacks(receiveRateTick)
@@ -1390,8 +1442,8 @@ class BleViewModel : ViewModel() {
             gyro
         }
 
-        val rawTimeMs = System.currentTimeMillis() - sessionStartTimeMs
-        val timeMs = if (rawTimeMs <= lastAssignedTimeMs) lastAssignedTimeMs + 20L else rawTimeMs
+        val rawTimeMs = (SystemClock.elapsedRealtimeNanos() - sessionStartNanos) / 1_000_000.0
+        val timeMs = maxOf(rawTimeMs, lastAssignedTimeMs + 0.001)
         lastAssignedTimeMs = timeMs
         val timeFloat = timeMs.toFloat()
 
@@ -1563,11 +1615,16 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AppRouter(viewModel: BleViewModel = viewModel()) {
+    val secondViewModel: BleViewModel = viewModel(key = "electrophy_second")
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         viewModel.init(context)
+        secondViewModel.init(context)
     }
+    var selectedDeviceSlot by remember { mutableIntStateOf(0) }
+    val activeViewModel = if (selectedDeviceSlot == 0) viewModel else secondViewModel
+    val otherViewModel = if (selectedDeviceSlot == 0) secondViewModel else viewModel
 
     // "raw" = Raw Data Mode (Home), null = Experiment Picker, else = specific experiment
     var currentScreen by remember { mutableStateOf<String?>("raw") }
@@ -1587,18 +1644,30 @@ fun AppRouter(viewModel: BleViewModel = viewModel()) {
         }
         currentScreen == "raw" -> {
             BleAppScreen(
-                viewModel = viewModel,
+                viewModel = activeViewModel,
+                otherViewModel = otherViewModel,
+                selectedDeviceSlot = selectedDeviceSlot,
+                onSelectDeviceSlot = { selectedDeviceSlot = it },
                 onNavigateToExperiments = { currentScreen = null }
             )
         }
         else -> {
             val mode = activeExperiment
             if (mode != null) {
-                ExperimentScreen(
-                    mode = mode,
-                    viewModel = viewModel,
-                    onBack = { currentScreen = null }
-                )
+                if (mode.id == "newtons_third_law") {
+                    NewtonsThirdLawScreen(
+                        first = viewModel,
+                        second = secondViewModel,
+                        mode = mode,
+                        onBack = { currentScreen = null }
+                    )
+                } else {
+                    ExperimentScreen(
+                        mode = mode,
+                        viewModel = activeViewModel,
+                        onBack = { currentScreen = null }
+                    )
+                }
             }
         }
     }
@@ -1608,12 +1677,21 @@ fun AppRouter(viewModel: BleViewModel = viewModel()) {
 @Composable
 fun BleAppScreen(
     viewModel: BleViewModel = viewModel(),
+    otherViewModel: BleViewModel? = null,
+    selectedDeviceSlot: Int = 0,
+    onSelectDeviceSlot: (Int) -> Unit = {},
     onNavigateToExperiments: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
     val connectionState by viewModel.connectionState.collectAsState()
     val availableDevices by viewModel.availableDevices.collectAsState()
+    val connectedDevice by viewModel.connectedDevice.collectAsState()
+    val connectedDeviceName by viewModel.connectedDeviceName.collectAsState()
+    val otherConnectionState = otherViewModel?.connectionState?.collectAsState()?.value
+        ?: ConnectionState.Disconnected
+    val otherConnectedDevice = otherViewModel?.connectedDevice?.collectAsState()?.value
+    val otherConnectedDeviceName = otherViewModel?.connectedDeviceName?.collectAsState()?.value
     val batteryStatus by viewModel.batteryStatus.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
@@ -1633,21 +1711,54 @@ fun BleAppScreen(
     val timeWindowSec by viewModel.timeWindowSec.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
+    var selectedPairAddresses by remember(availableDevices) {
+        mutableStateOf(availableDevices.takeIf { it.size == 2 }?.map { it.device.address }?.toSet() ?: emptySet())
+    }
 
     if (connectionState == ConnectionState.Disconnected && availableDevices.size > 1) {
         AlertDialog(
             onDismissRequest = viewModel::dismissDeviceList,
             title = { Text("Choose an ElectroPhy device") },
             text = {
-                Column {
+                Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                    if (otherViewModel != null && otherConnectionState == ConnectionState.Disconnected) {
+                        Text("Select two devices to connect together", style = MaterialTheme.typography.bodySmall)
+                    }
                     availableDevices.forEach { discovered ->
-                        TextButton(onClick = { viewModel.selectDevice(discovered) }) {
-                            Text(discovered.name)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (otherViewModel != null && otherConnectionState == ConnectionState.Disconnected) {
+                                val address = discovered.device.address
+                                Checkbox(
+                                    checked = address in selectedPairAddresses,
+                                    onCheckedChange = { checked ->
+                                        selectedPairAddresses = if (checked) {
+                                            if (selectedPairAddresses.size < 2) selectedPairAddresses + address else selectedPairAddresses
+                                        } else selectedPairAddresses - address
+                                    }
+                                )
+                            }
+                            TextButton(onClick = { viewModel.selectDevice(discovered) }) {
+                                Text(discovered.name)
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
+                if (otherViewModel != null && otherConnectionState == ConnectionState.Disconnected) {
+                    TextButton(
+                        enabled = selectedPairAddresses.size == 2,
+                        onClick = {
+                            val selected = availableDevices.filter { it.device.address in selectedPairAddresses }
+                            if (selected.size == 2) {
+                                viewModel.selectDevice(selected[0])
+                                otherViewModel.connectDiscoveredDevice(selected[1])
+                            }
+                        }
+                    ) { Text("Connect both") }
+                }
+            },
+            dismissButton = {
                 TextButton(onClick = viewModel::dismissDeviceList) { Text("Cancel") }
             }
         )
@@ -1716,7 +1827,7 @@ fun BleAppScreen(
         val allGranted = permissions.entries.all { it.value }
         if (allGranted) {
             if (connectionState == ConnectionState.Disconnected) {
-                viewModel.startScan()
+                viewModel.startScan(otherConnectedDevice)
             }
         } else {
             Toast.makeText(context, "Permissions required for BLE", Toast.LENGTH_SHORT).show()
@@ -1742,7 +1853,7 @@ fun BleAppScreen(
 
         if (allGranted) {
             if (connectionState == ConnectionState.Disconnected) {
-                viewModel.startScan()
+                viewModel.startScan(otherConnectedDevice)
             }
         } else {
             permissionLauncher.launch(requiredPermissions)
@@ -1781,6 +1892,27 @@ fun BleAppScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
+            if (otherViewModel != null) {
+                val firstState = if (selectedDeviceSlot == 0) connectionState else otherConnectionState
+                val secondState = if (selectedDeviceSlot == 1) connectionState else otherConnectionState
+                val firstName = if (selectedDeviceSlot == 0) connectedDeviceName else otherConnectedDeviceName
+                val secondName = if (selectedDeviceSlot == 1) connectedDeviceName else otherConnectedDeviceName
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedDeviceSlot == 0,
+                        onClick = { onSelectDeviceSlot(0) },
+                        label = { Text("Device 1: ${firstName ?: firstState.name}") }
+                    )
+                    FilterChip(
+                        selected = selectedDeviceSlot == 1,
+                        onClick = { onSelectDeviceSlot(1) },
+                        label = { Text("Device 2: ${secondName ?: secondState.name}") }
+                    )
+                }
+            }
             // Top Controls
             Row(
                 modifier = Modifier
@@ -1795,7 +1927,8 @@ fun BleAppScreen(
                     } else {
                         viewModel.disconnect()
                     }
-                }) {
+                }, enabled = otherConnectionState != ConnectionState.Scanning ||
+                        connectionState != ConnectionState.Disconnected) {
                     Text(if (connectionState == ConnectionState.Disconnected) "Connect" else "Disconnect")
                 }
 
