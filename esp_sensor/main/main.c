@@ -14,7 +14,7 @@
  *
  * BLE
  * ---
- *  Device name : ESP_IMU
+ *  Device name : ElectroPhy_XXXX (last two bytes of BLE identity MAC)
  *  Service     : 0x1819
  *  Characteristic : 0xABCD  (Notify)
  *  Payload     : ASCII string, same format as serial log
@@ -23,7 +23,7 @@
 
 /* Assembly tests: set exactly one to 1, then rebuild/flash.
  * Both 0 = normal firmware. Controller test prints over USB D+/D-.
- * BLE test sends ASCII dummy data on ESP_IMU's NUS TX characteristic.
+ * BLE test sends ASCII dummy data on ElectroPhy's NUS TX characteristic.
  */
 #ifndef ONLY_CONTROLLER_TESTING
 #define ONLY_CONTROLLER_TESTING 0
@@ -104,7 +104,8 @@
 #define SPI_CLK_HZ  (8 * 1000 * 1000)  /* 8 MHz */
 
 #if USE_BLE
-#define DEVICE_NAME       "ESP_IMU"
+#define DEVICE_NAME_PREFIX "ElectroPhy_"
+static char device_name[sizeof(DEVICE_NAME_PREFIX) + 4];
 #define BLE_CONNECT_TIMEOUT_MS 30000
 
 static struct ble_npl_callout ble_shutdown_callout;
@@ -1327,12 +1328,10 @@ static void ble_start_advertising(void)
     }
     struct ble_hs_adv_fields fields = {0};
     fields.flags            = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name             = (uint8_t *)DEVICE_NAME;
-    fields.name_len         = strlen(DEVICE_NAME);
+    fields.name             = (uint8_t *)device_name;
+    fields.name_len         = strlen(device_name);
     fields.name_is_complete = 1;
-    fields.uuids128         = &nus_svc_uuid;
-    fields.num_uuids128     = 1;
-    fields.uuids128_is_complete = 1;
+    /* The longer unique name and 128-bit UUID do not fit together in 31 bytes. */
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -1351,7 +1350,7 @@ static void ble_start_advertising(void)
     if (rc != 0) {
         ESP_LOGE(TAG_BLE, "adv_start error: %d", rc);
     } else {
-        ESP_LOGI(TAG_BLE, "Advertising as \"%s\"", DEVICE_NAME);
+        ESP_LOGI(TAG_BLE, "Advertising as \"%s\"", device_name);
     }
 }
 
@@ -1373,6 +1372,17 @@ static void ble_on_sync(void)
         ESP_LOGE(TAG_BLE, "infer_auto addr type failed: %d", rc);
         return;
     }
+
+    uint8_t identity_addr[6];
+    rc = ble_hs_id_copy_addr(own_addr_type, identity_addr, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG_BLE, "copy identity address failed: %d", rc);
+        return;
+    }
+    /* NimBLE stores addresses least significant byte first. */
+    snprintf(device_name, sizeof(device_name), DEVICE_NAME_PREFIX "%02X%02X",
+             identity_addr[1], identity_addr[0]);
+    ble_svc_gap_device_name_set(device_name);
 
     ESP_LOGI(TAG_BLE, "NimBLE host synced (addr_type=%d) — starting advertising.", own_addr_type);
     ble_start_advertising();
@@ -1596,7 +1606,7 @@ static void ble_stack_init(void)
     ble_hs_cfg.reset_cb = ble_on_reset;
 
     /* GAP device name */
-    ble_svc_gap_device_name_set(DEVICE_NAME);
+    /* Set the name after the identity address is available in ble_on_sync. */
 
     /* Register standard GAP + GATT services, then our custom IMU service */
     ble_svc_gap_init();
@@ -1996,7 +2006,7 @@ void app_main(void)
 #endif
 
     if (ONLY_BLE_TESTING) {
-        ESP_LOGI(TAG, "BLE test: connect to ESP_IMU and subscribe to NUS TX; sensor disabled");
+        ESP_LOGI(TAG, "BLE test: connect to ElectroPhy_XXXX and subscribe to NUS TX; sensor disabled");
         return; /* Dummy notifications run on the NimBLE host callout. */
     }
 

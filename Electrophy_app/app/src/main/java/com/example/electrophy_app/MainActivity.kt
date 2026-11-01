@@ -95,6 +95,10 @@ private const val CHART_MAX_POINTS_CAP = 50_000   // Safety cap against OOM at m
 private const val SAMPLE_RATE_UPDATE_INTERVAL_MS = 2_000L
 private const val PREFERRED_BLE_MTU = 517
 private const val BLE_TAG = "ElectrophyBLE"
+private const val BLE_SCAN_DURATION_MS = 5_000L
+private val ELECTROPHY_NAME = Regex("^ElectroPhy_[0-9A-Fa-f]{4}$")
+
+data class DiscoveredElectrophy(val name: String, val device: BluetoothDevice)
 
 
 data class OdrOption(val label: String, val suffix: String)
@@ -186,6 +190,9 @@ val gyroOdrOptions = listOf(
 class BleViewModel : ViewModel() {
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
+    private val _availableDevices = MutableStateFlow<List<DiscoveredElectrophy>>(emptyList())
+    val availableDevices: StateFlow<List<DiscoveredElectrophy>> = _availableDevices
+    private var scanGeneration = 0
     private val _batteryStatus = MutableStateFlow<BatteryStatus?>(null)
     val batteryStatus: StateFlow<BatteryStatus?> = _batteryStatus
     @Volatile private var lastBatteryMs = 0L
@@ -727,10 +734,11 @@ class BleViewModel : ViewModel() {
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
-            val deviceName = device.name ?: return
-            if (deviceName == "ESP_IMU") {
-                stopScan()
-                connectToDevice(device)
+            val deviceName = result.scanRecord?.deviceName ?: device.name ?: return
+            if (_connectionState.value != ConnectionState.Scanning || !ELECTROPHY_NAME.matches(deviceName)) return
+            _availableDevices.update { devices ->
+                if (devices.any { it.device.address == device.address }) devices
+                else devices + DiscoveredElectrophy(deviceName, device)
             }
         }
     }
@@ -1162,19 +1170,36 @@ class BleViewModel : ViewModel() {
         scanner = adapter.bluetoothLeScanner
         if (scanner == null) return
 
+        _availableDevices.value = emptyList()
         _connectionState.value = ConnectionState.Scanning
+        val generation = ++scanGeneration
         scanner?.startScan(scanCallback)
 
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (_connectionState.value == ConnectionState.Scanning) {
+        mainHandler.postDelayed({
+            if (generation == scanGeneration && _connectionState.value == ConnectionState.Scanning) {
                 stopScan()
                 _batteryStatus.value = null
                 _connectionState.value = ConnectionState.Disconnected
+                if (_availableDevices.value.size == 1) {
+                    connectToDevice(_availableDevices.value.single().device)
+                }
             }
-        }, 10000)
+        }, BLE_SCAN_DURATION_MS)
+    }
+
+    fun selectDevice(device: DiscoveredElectrophy) {
+        if (_connectionState.value != ConnectionState.Disconnected ||
+            _availableDevices.value.none { it.device.address == device.device.address }) return
+        _availableDevices.value = emptyList()
+        connectToDevice(device.device)
+    }
+
+    fun dismissDeviceList() {
+        _availableDevices.value = emptyList()
     }
 
     private fun stopScan() {
+        scanGeneration++
         scanner?.stopScan(scanCallback)
     }
 
@@ -1187,6 +1212,7 @@ class BleViewModel : ViewModel() {
 
     fun disconnect() {
         stopScan()
+        _availableDevices.value = emptyList()
         _isPaused.value = false
         mainHandler.post {
             mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
@@ -1587,6 +1613,7 @@ fun BleAppScreen(
     val context = LocalContext.current
 
     val connectionState by viewModel.connectionState.collectAsState()
+    val availableDevices by viewModel.availableDevices.collectAsState()
     val batteryStatus by viewModel.batteryStatus.collectAsState()
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
@@ -1606,6 +1633,25 @@ fun BleAppScreen(
     val timeWindowSec by viewModel.timeWindowSec.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
     val isConnected = (connectionState == ConnectionState.Connected)
+
+    if (connectionState == ConnectionState.Disconnected && availableDevices.size > 1) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissDeviceList,
+            title = { Text("Choose an ElectroPhy device") },
+            text = {
+                Column {
+                    availableDevices.forEach { discovered ->
+                        TextButton(onClick = { viewModel.selectDevice(discovered) }) {
+                            Text(discovered.name)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::dismissDeviceList) { Text("Cancel") }
+            }
+        )
+    }
 
     val isFilterEnabled by viewModel.isFilterEnabled.collectAsState()
     val filterAlpha by viewModel.filterAlpha.collectAsState()
