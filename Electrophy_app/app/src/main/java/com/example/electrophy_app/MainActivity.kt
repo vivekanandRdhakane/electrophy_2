@@ -368,8 +368,23 @@ class BleViewModel : ViewModel() {
     val autoTriggerDelayMs: StateFlow<Long> = _autoTriggerDelayMs
 
     private var isTriggerPending = false
+    var onThresholdCrossed: (() -> Unit)? = null
+    var onAutoTriggerPending: (() -> Unit)? = null
     var onAutoTriggerCapture: (() -> Unit)? = null
     private var baselineX = 0f; private var baselineY = 0f; private var baselineZ = 0f; private var isBaselineInitialized = false
+
+    fun schedulePause(delayMs: Long) {
+        if (_connectionState.value != ConnectionState.Connected || _isPaused.value || isTriggerPending) return
+        isTriggerPending = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!_isPaused.value) {
+                togglePause()
+                Log.i(BLE_TAG, "Auto-trigger pause executed.")
+            }
+            onAutoTriggerCapture?.invoke()
+            isTriggerPending = false
+        }, delayMs)
+    }
 
     fun setAutoTriggerEnabled(enabled: Boolean) {
         _isAutoTriggerEnabled.value = enabled
@@ -436,8 +451,14 @@ class BleViewModel : ViewModel() {
         }
 
         if (triggered) {
+            val custom = onThresholdCrossed
+            if (custom != null) {
+                custom.invoke()
+                return
+            }
             isTriggerPending = true
             Log.i(BLE_TAG, "Auto-trigger threshold crossed ($condition $threshold on $axis)! Pausing in $delay ms...")
+            onAutoTriggerPending?.invoke()
             Handler(Looper.getMainLooper()).postDelayed({
                 if (!_isPaused.value) {
                     togglePause()

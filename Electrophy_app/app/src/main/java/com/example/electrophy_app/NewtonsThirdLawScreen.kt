@@ -1,15 +1,19 @@
 package com.example.electrophy_app
 
+import android.os.SystemClock
 import android.view.ViewGroup
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
@@ -94,18 +98,47 @@ fun NewtonsThirdLawScreen(
     var capturedPeakTimes by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     var cursorEnabled by remember { mutableStateOf(false) }
 
+    var firstCrossedTime by remember { mutableLongStateOf(0L) }
+    var secondCrossedTime by remember { mutableLongStateOf(0L) }
+    var dualTriggerFired by remember { mutableStateOf(false) }
+
     LaunchedEffect(mode.id) {
         first.applyExperimentMode(mode)
         second.applyExperimentMode(mode)
     }
     DisposableEffect(first, second) {
-        first.onAutoTriggerCapture = {
-            if (second.connectionState.value == ConnectionState.Connected && !second.isPaused.value) second.togglePause()
+        val COINCIDENCE_WINDOW_MS = 3000L
+
+        fun checkBothCrossed() {
+            if (dualTriggerFired || first.isPaused.value || second.isPaused.value) return
+            val now = SystemClock.uptimeMillis()
+            val firstValid = firstCrossedTime > 0L && (now - firstCrossedTime) <= COINCIDENCE_WINDOW_MS
+            val secondValid = secondCrossedTime > 0L && (now - secondCrossedTime) <= COINCIDENCE_WINDOW_MS
+            if (firstValid && secondValid) {
+                dualTriggerFired = true
+                val delay = maxOf(first.autoTriggerDelayMs.value, second.autoTriggerDelayMs.value)
+                first.schedulePause(delay)
+                second.schedulePause(delay)
+            }
         }
-        second.onAutoTriggerCapture = {
-            if (first.connectionState.value == ConnectionState.Connected && !first.isPaused.value) first.togglePause()
+
+        first.onThresholdCrossed = {
+            if (!dualTriggerFired && !first.isPaused.value && !second.isPaused.value) {
+                firstCrossedTime = SystemClock.uptimeMillis()
+                checkBothCrossed()
+            }
+        }
+        second.onThresholdCrossed = {
+            if (!dualTriggerFired && !first.isPaused.value && !second.isPaused.value) {
+                secondCrossedTime = SystemClock.uptimeMillis()
+                checkBothCrossed()
+            }
         }
         onDispose {
+            first.onThresholdCrossed = null
+            second.onThresholdCrossed = null
+            first.onAutoTriggerPending = null
+            second.onAutoTriggerPending = null
             first.onAutoTriggerCapture = null
             second.onAutoTriggerCapture = null
         }
@@ -118,19 +151,6 @@ fun NewtonsThirdLawScreen(
     val windowMs = timeWindowSec * 1000f
     val firstShownRate = if (firstPaused) firstCapturedRate else firstReceiveRate
     val secondShownRate = if (secondPaused) secondCapturedRate else secondReceiveRate
-
-    LaunchedEffect(firstPaused, secondPaused) {
-        if (!firstPaused || !secondPaused) cursorEnabled = false
-    }
-
-    LaunchedEffect(firstPaused, secondPaused, collisionAlongX, firstZero, secondZero,
-        firstData.highG.isEmpty(), secondData.highG.isEmpty()) {
-        capturedPeakTimes = if (firstPaused && secondPaused) {
-            val firstPeak = impactPeakTime(first.chartData.value.highG, firstZero, collisionAlongX, windowMs)
-            val secondPeak = impactPeakTime(second.chartData.value.highG, secondZero, collisionAlongX, windowMs)
-            if (firstPeak != null && secondPeak != null) firstPeak to secondPeak else null
-        } else null
-    }
 
     fun setTimeWindow(seconds: Float) {
         val delayMs = (seconds * 500f).roundToLong()
@@ -145,6 +165,27 @@ fun NewtonsThirdLawScreen(
         val axis = if (alongX) "X" else "Y"
         first.setAutoTriggerAxis(axis)
         second.setAutoTriggerAxis(axis)
+    }
+
+    LaunchedEffect(firstPaused, secondPaused) {
+        if (!firstPaused || !secondPaused) {
+            cursorEnabled = false
+            dualTriggerFired = false
+            firstCrossedTime = 0L
+            secondCrossedTime = 0L
+        }
+    }
+
+    LaunchedEffect(firstPaused, secondPaused, collisionAlongX, firstZero, secondZero,
+        firstData.highG.isEmpty(), secondData.highG.isEmpty()) {
+        capturedPeakTimes = if (firstPaused && secondPaused) {
+            val firstPeak = impactPeakTime(first.chartData.value.highG, firstZero, collisionAlongX, 10000f)
+            val secondPeak = impactPeakTime(second.chartData.value.highG, secondZero, collisionAlongX, 10000f)
+            if (firstPeak != null && secondPeak != null) {
+                setTimeWindow(0.010f)
+                firstPeak to secondPeak
+            } else null
+        } else null
     }
 
     Scaffold(topBar = {
@@ -174,6 +215,9 @@ fun NewtonsThirdLawScreen(
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
                 TextButton(onClick = {
+                    if (timeWindowSec < 1f) {
+                        setTimeWindow(3f)
+                    }
                     if (firstPaused) first.togglePause()
                     if (secondPaused) second.togglePause()
                 }, enabled = bothConnected && (firstPaused || secondPaused), contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Resume") }
@@ -208,7 +252,7 @@ fun NewtonsThirdLawScreen(
                     Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)) {
                         Text("Time Window: ${timeWindowOptions.minByOrNull { abs(it.seconds - timeWindowSec) }?.label ?: "10 ms"}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        val index = timeWindowOptions.indexOfFirst { abs(it.seconds - timeWindowSec) < 0.0001f }.coerceAtLeast(0)
+                        val index = timeWindowOptions.indices.minByOrNull { abs(timeWindowOptions[it].seconds - timeWindowSec) } ?: 0
                         Slider(
                             value = index.toFloat(),
                             onValueChange = { setTimeWindow(timeWindowOptions[it.roundToLong().toInt().coerceIn(0, timeWindowOptions.lastIndex)].seconds) },
@@ -338,16 +382,39 @@ private fun CollisionChart(
     var cursor2 by remember(cursorEnabled) { mutableStateOf<Entry?>(null) }
     val chartRef = remember { mutableStateOf<LineChart?>(null) }
     val peaksAligned = impactAnchors != null
+    // Peak labels: data-space entries of the max-|y| point for each curve when paused
+    var peakEntry1 by remember { mutableStateOf<Entry?>(null) }
+    var peakEntry2 by remember { mutableStateOf<Entry?>(null) }
+    val peakPaint1 = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.CYAN
+            textSize = 36f; isFakeBoldText = true; isAntiAlias = true
+            setShadowLayer(3f, 1f, 1f, android.graphics.Color.BLACK)
+        }
+    }
+    val peakPaint2 = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(255, 165, 0)
+            textSize = 36f; isFakeBoldText = true; isAntiAlias = true
+            setShadowLayer(3f, 1f, 1f, android.graphics.Color.BLACK)
+        }
+    }
+    LaunchedEffect(peaksAligned) {
+        if (!peaksAligned) { peakEntry1 = null; peakEntry2 = null }
+    }
     val firstAnchor = impactAnchors?.first ?: firstPoints.lastOrNull()?.time
     val secondAnchor = impactAnchors?.second ?: secondPoints.lastOrNull()?.time
-    val defaultEnd = if (peaksAligned) timeWindowMs / 2f else 0f
+    // X-axis animated zoom: after trigger pause, zoom to ±5 ms around the peak
+    val animatedWindowMs = remember { Animatable(timeWindowMs) }
+    val effectiveTimeWindowMs = animatedWindowMs.value  // drives recomposition every animation frame
+    val defaultEnd = if (peaksAligned) effectiveTimeWindowMs / 2f else 0f
     val bounds = listOfNotNull(
         firstAnchor?.let { anchor -> firstPoints.first().time - anchor to firstPoints.last().time - anchor },
         secondAnchor?.let { anchor -> secondPoints.first().time - anchor to secondPoints.last().time - anchor }
     )
     val earliestShared = bounds.maxOfOrNull { it.first } ?: 0f
     val latestShared = bounds.minOfOrNull { it.second } ?: 0f
-    val sliderMinEnd = earliestShared + timeWindowMs
+    val sliderMinEnd = earliestShared + effectiveTimeWindowMs
     val sliderMaxEnd = maxOf(defaultEnd, latestShared)
     val canBrowse = peaksAligned && sliderMinEnd < sliderMaxEnd
     var selectedEnd by remember { mutableStateOf<Float?>(null) }
@@ -357,8 +424,37 @@ private fun CollisionChart(
     LaunchedEffect(firstPoints.isEmpty(), secondPoints.isEmpty()) {
         if (firstPoints.isEmpty() && secondPoints.isEmpty()) selectedEnd = null
     }
+    var initialSpikeZoomDone by remember { mutableStateOf(false) }
+    LaunchedEffect(peaksAligned, timeWindowMs) {
+        if (peaksAligned) {
+            if (!initialSpikeZoomDone) {
+                initialSpikeZoomDone = true
+                animatedWindowMs.animateTo(timeWindowMs, animationSpec = tween(durationMillis = 1200))
+            } else {
+                animatedWindowMs.animateTo(timeWindowMs, animationSpec = tween(durationMillis = 250))
+            }
+        } else {
+            initialSpikeZoomDone = false
+            animatedWindowMs.snapTo(timeWindowMs)
+        }
+    }
+    // Y-axis animation: wide default (±100g) when live, auto-fit after trigger pause
+    var computedPeak by remember { mutableFloatStateOf(0f) }
+    val animatedYMax = remember { Animatable(100f) }
+    val currentYMax = animatedYMax.value  // reading here ties recomposition to animation frames
+    LaunchedEffect(peaksAligned) {
+        if (!peaksAligned) {
+            computedPeak = 0f
+            animatedYMax.animateTo(100f, animationSpec = tween(durationMillis = 400))
+        }
+    }
+    LaunchedEffect(computedPeak) {
+        if (peaksAligned && computedPeak > 1f) {
+            animatedYMax.animateTo(computedPeak * 1.15f, animationSpec = tween(durationMillis = 700))
+        }
+    }
     val viewEnd = if (canBrowse) (selectedEnd ?: defaultEnd).coerceIn(sliderMinEnd, sliderMaxEnd) else defaultEnd
-    val viewStart = viewEnd - timeWindowMs
+    val viewStart = viewEnd - effectiveTimeWindowMs
 
     Column(modifier = modifier) {
     Box(Modifier.fillMaxWidth().weight(1f).then(
@@ -425,14 +521,28 @@ private fun CollisionChart(
             }
             val firstEntries = entries(firstPoints, firstZero, impactAnchors?.first)
             val secondEntries = entries(secondPoints, secondZero, impactAnchors?.second)
+            // Capture peak entries for label overlay (only when paused with aligned peaks)
+            if (peaksAligned) {
+                val p1 = firstEntries.maxByOrNull { abs(it.y) }
+                val p2 = secondEntries.maxByOrNull { abs(it.y) }
+                if (p1 != null && peakEntry1 != p1) peakEntry1 = p1
+                if (p2 != null && peakEntry2 != p2) peakEntry2 = p2
+            }
             val peak = (firstEntries + secondEntries).maxOfOrNull { abs(it.y) }?.coerceAtLeast(1f) ?: 1f
-            chart.axisLeft.axisMinimum = -peak * 1.15f
-            chart.axisLeft.axisMaximum = peak * 1.15f
+            // Feed back peak when paused so the animation LaunchedEffect can target it
+            if (peaksAligned && computedPeak != peak) computedPeak = peak
+            chart.axisLeft.axisMinimum = -currentYMax
+            chart.axisLeft.axisMaximum = currentYMax
+            if (peaksAligned) {
+                chart.axisLeft.setLabelCount(11, true)
+            } else {
+                chart.axisLeft.setLabelCount(6, false)
+            }
             chart.xAxis.axisMinimum = viewStart
             chart.xAxis.axisMaximum = viewEnd
             chart.xAxis.valueFormatter = object : ValueFormatter() {
                 override fun getFormattedValue(value: Float) =
-                    if (timeWindowMs < 1000f) String.format(Locale.US, "%.0f ms", value)
+                    if (effectiveTimeWindowMs < 1000f) String.format(Locale.US, "%.0f ms", value)
                     else String.format(Locale.US, "%.2f s", value / 1000f)
             }
             chart.data = LineData(
@@ -454,6 +564,7 @@ private fun CollisionChart(
     )
     Canvas(Modifier.fillMaxSize()) {
         val chart = chartRef.value ?: return@Canvas
+        // Cursor crosshairs
         listOf(cursor1 to Color(0xFF00E5FF), cursor2 to Color(0xFFFFAB40)).forEach { (entry, color) ->
             if (entry != null && entry.x in viewStart..viewEnd) {
                 val pixel = chart.getPixelForValues(entry.x, entry.y, YAxis.AxisDependency.LEFT)
@@ -462,6 +573,26 @@ private fun CollisionChart(
                 drawLine(color, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.5f)
                 drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.5f)
                 drawCircle(color, radius = 5f, center = Offset(x, y))
+            }
+        }
+        // Peak value labels (shown when paused with aligned peaks)
+        if (peaksAligned) {
+            listOf(peakEntry1 to peakPaint1, peakEntry2 to peakPaint2).forEach { (entry, paint) ->
+                if (entry != null) {
+                    val pixel = chart.getPixelForValues(entry.x, entry.y, YAxis.AxisDependency.LEFT)
+                    val px = pixel.x.toFloat()
+                    val py = pixel.y.toFloat()
+                    if (px in 0f..size.width && py in 0f..size.height) {
+                        val label = String.format(java.util.Locale.US, "%.2f g", entry.y)
+                        // Place label above peak if positive, below if negative
+                        val labelY = if (entry.y >= 0f) (py - 14f).coerceAtLeast(paint.textSize) else py + paint.textSize + 4f
+                        // Clamp label horizontally so it stays within chart
+                        val labelX = (px + 8f).coerceAtMost(size.width - paint.measureText(label) - 4f)
+                        // Dot at the peak point
+                        drawCircle(Color(paint.color), radius = 6f, center = Offset(px, py))
+                        drawContext.canvas.nativeCanvas.drawText(label, labelX, labelY, paint)
+                    }
+                }
             }
         }
     }
