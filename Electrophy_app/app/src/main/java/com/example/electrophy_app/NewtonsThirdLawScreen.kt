@@ -67,18 +67,10 @@ fun NewtonsThirdLawScreen(
 ) {
     val firstState by first.connectionState.collectAsState()
     val secondState by second.connectionState.collectAsState()
-    val firstTiming by first.timingStatus.collectAsState()
-    val secondTiming by second.timingStatus.collectAsState()
     val firstName by first.connectedDeviceName.collectAsState()
     val secondName by second.connectedDeviceName.collectAsState()
-    val firstReceiveRate by first.receivedSamplesPerSecond.collectAsState()
-    val secondReceiveRate by second.receivedSamplesPerSecond.collectAsState()
-    val firstCapturedRate by first.lastActiveSamplesPerSecond.collectAsState()
-    val secondCapturedRate by second.lastActiveSamplesPerSecond.collectAsState()
     val firstData by first.chartData.collectAsState()
     val secondData by second.chartData.collectAsState()
-    val firstArrivalMs by first.lastSampleArrivalMs.collectAsState()
-    val secondArrivalMs by second.lastSampleArrivalMs.collectAsState()
     val timeWindowSec by first.timeWindowSec.collectAsState()
     val highGOdr by first.highGOdr.collectAsState()
     val highGRange by first.highGRange.collectAsState()
@@ -147,12 +139,7 @@ fun NewtonsThirdLawScreen(
     }
 
     val bothConnected = firstState == ConnectionState.Connected && secondState == ConnectionState.Connected
-    val latestReceiveGapMs = if (firstArrivalMs != null && secondArrivalMs != null) {
-        abs(firstArrivalMs!! - secondArrivalMs!!)
-    } else null
     val windowMs = timeWindowSec * 1000f
-    val firstShownRate = if (firstPaused) firstCapturedRate else firstReceiveRate
-    val secondShownRate = if (secondPaused) secondCapturedRate else secondReceiveRate
 
     fun setTimeWindow(seconds: Float) {
         val delayMs = (seconds * 500f).roundToLong()
@@ -196,142 +183,133 @@ fun NewtonsThirdLawScreen(
             navigationIcon = { TextButton(onClick = onBack) { Text("Back") } }
         )
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            NewtonSettingCard {
-                Column(Modifier.fillMaxWidth().padding(8.dp)) {
-                    Row(Modifier.fillMaxWidth().clickable { instructionsExpanded = !instructionsExpanded }, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Instructions & Setup", style = MaterialTheme.typography.titleSmall)
-                        Text(if (instructionsExpanded) "▲" else "▼")
-                    }
-                    if (instructionsExpanded) {
-                        Text("Two strikers · signed planar acceleration (g)", style = MaterialTheme.typography.titleSmall)
-                        Text(mode.instructions, style = MaterialTheme.typography.bodySmall)
-                        Text("Match the sensor X/Y directions on both strikers. The graph sign follows the selected collision axis.", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("1: ${firstName ?: firstState.name}  ·  2: ${secondName ?: secondState.name}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (bothConnected) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f))
-                TextButton(onClick = {
-                    if (timeWindowSec < 1f) {
-                        setTimeWindow(3f)
-                    }
-                    if (firstPaused) first.togglePause()
-                    if (secondPaused) second.togglePause()
-                }, enabled = bothConnected && (firstPaused || secondPaused), contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Resume") }
-                TextButton(onClick = {
-                    first.clearLogs()
-                    second.clearLogs()
-                }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Clear") }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Collision direction", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
-                FilterChip(collisionAlongX, onClick = { setAxis(true) }, label = { Text("X") })
-                FilterChip(!collisionAlongX, onClick = { setAxis(false) }, label = { Text("Y") })
-                if (firstPaused && secondPaused) {
-                    Spacer(Modifier.weight(1f))
-                    Text("Cursor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
-                    Switch(checked = cursorEnabled, onCheckedChange = { cursorEnabled = it })
-                }
-            }
-            CollisionChart(
-                firstPoints = if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
-                secondPoints = if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
-                firstZero = firstZero,
-                secondZero = secondZero,
-                collisionAlongX = collisionAlongX,
-                timeWindowMs = windowMs,
-                impactAnchors = if (firstPaused && secondPaused) capturedPeakTimes else null,
-                cursorEnabled = cursorEnabled,
-                modifier = Modifier.fillMaxWidth().weight(1f)
-            )
-            Column(Modifier.fillMaxWidth().weight(0.9f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+            val controlsMaxHeight = maxHeight * 0.45f
+            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 NewtonSettingCard {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)) {
-                        Text("Time Window: ${timeWindowOptions.minByOrNull { abs(it.seconds - timeWindowSec) }?.label ?: "10 ms"}",
-                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        val index = timeWindowOptions.indices.minByOrNull { abs(timeWindowOptions[it].seconds - timeWindowSec) } ?: 0
-                        Slider(
-                            value = index.toFloat(),
-                            onValueChange = { setTimeWindow(timeWindowOptions[it.roundToLong().toInt().coerceIn(0, timeWindowOptions.lastIndex)].seconds) },
-                            valueRange = 0f..timeWindowOptions.lastIndex.toFloat(),
-                            steps = timeWindowOptions.size - 2,
-                            modifier = Modifier.height(30.dp)
-                        )
+                    Column(Modifier.fillMaxWidth().padding(8.dp)) {
+                        Row(Modifier.fillMaxWidth().clickable { instructionsExpanded = !instructionsExpanded }, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Instructions & Setup", style = MaterialTheme.typography.titleSmall)
+                            Text(if (instructionsExpanded) "▲" else "▼")
+                        }
+                        if (instructionsExpanded) {
+                            Text("Two strikers · signed planar acceleration (g)", style = MaterialTheme.typography.titleSmall)
+                            Text(mode.instructions, style = MaterialTheme.typography.bodySmall)
+                            Text("Match the sensor X/Y directions on both strikers. The graph sign follows the selected collision axis.", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
-                NewtonCollapsibleCard("Sensor Calibration (High-G Zero)", if (zeroed) "Both sensors zeroed" else "Tap to zero both sensors",
-                    calibrationExpanded, { calibrationExpanded = !calibrationExpanded }) {
-                        Text("Keep both strikers still, then zero both X/Y baselines.", style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = {
-                            firstZero = zeroFrom(firstData.highG)
-                            secondZero = zeroFrom(secondData.highG)
-                            zeroed = true
-                        }, enabled = bothConnected && firstData.highG.isNotEmpty() && secondData.highG.isNotEmpty()) {
-                            Text("Zero both sensors")
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("1: ${firstName ?: firstState.name}  ·  2: ${secondName ?: secondState.name}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (bothConnected) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f))
+                    TextButton(onClick = {
+                        if (timeWindowSec < 1f) {
+                            setTimeWindow(3f)
                         }
+                        if (firstPaused) first.togglePause()
+                        if (secondPaused) second.togglePause()
+                    }, enabled = bothConnected && (firstPaused || secondPaused), contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Resume") }
+                    TextButton(onClick = {
+                        first.clearLogs()
+                        second.clearLogs()
+                    }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Clear") }
                 }
-                NewtonCollapsibleCard("Sensor Sampling Rate and Range", "High-G · ${highGOdrOptions.find { it.suffix == highGOdr }?.label ?: highGOdr} · ${highGRangeOptions.find { it.suffix == highGRange }?.label ?: highGRange}",
-                    samplingExpanded, { samplingExpanded = !samplingExpanded }) {
-                        Text("High-G Accel", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
-                        CompactOdrDropdown("High-G", highGOdrOptions.filter { it.suffix != "off" }, highGOdr, true) {
-                            first.setHighGOdr(it)
-                            second.setHighGOdr(it)
-                        }
-                        CompactRangeDropdown("High-G", highGRangeOptions, highGRange, true) {
-                            first.setHighGRange(it)
-                            second.setHighGRange(it)
-                        }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Collision direction", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
+                    FilterChip(collisionAlongX, onClick = { setAxis(true) }, label = { Text("X") })
+                    FilterChip(!collisionAlongX, onClick = { setAxis(false) }, label = { Text("Y") })
+                    if (firstPaused && secondPaused) {
+                        Spacer(Modifier.weight(1f))
+                        Text("Cursor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
+                        Switch(checked = cursorEnabled, onCheckedChange = { cursorEnabled = it })
+                    }
                 }
-                NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · ${triggerDelayMs} ms" else "Disabled",
-                    triggerExpanded, { triggerExpanded = !triggerExpanded }) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text("Enable Auto-Trigger", style = MaterialTheme.typography.bodySmall)
-                            Switch(checked = triggerEnabled, onCheckedChange = {
-                                first.setAutoTriggerEnabled(it)
-                                second.setAutoTriggerEnabled(it)
-                            })
-                        }
-                        Text("Condition", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            listOf("Above", "Below", "Deviation").forEach { condition ->
-                                FilterChip(triggerCondition == condition, onClick = {
-                                    first.setAutoTriggerCondition(condition)
-                                    second.setAutoTriggerCondition(condition)
-                                }, label = { Text(condition) })
-                            }
-                        }
-                        OutlinedTextField(
-                            value = thresholdText,
-                            onValueChange = { entered ->
-                                thresholdText = entered
-                                entered.toFloatOrNull()?.takeIf { it >= 0f }?.let {
-                                    first.setAutoTriggerThreshold(it)
-                                    second.setAutoTriggerThreshold(it)
-                                }
-                            },
-                            label = { Text("Threshold (g)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text("Post-trigger delay: $triggerDelayMs ms (½ time window)", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
-                Text("1: $firstTiming\n2: $secondTiming", style = MaterialTheme.typography.labelSmall)
-                Text("Blue 1: ${if (firstState == ConnectionState.Connected && firstShownRate > 0) firstShownRate else "--"} samples/s   ·   Orange 2: ${if (secondState == ConnectionState.Connected && secondShownRate > 0) secondShownRate else "--"} samples/s${if (firstPaused && secondPaused) " (before pause)" else ""}",
-                    style = MaterialTheme.typography.labelSmall)
-                Text(
-                    if (latestReceiveGapMs == null) "Latest packets: waiting for both devices"
-                    else "Latest receive gap: ${String.format(Locale.US, "%.2f", latestReceiveGapMs / 1000.0)} s · ${if (firstPaused && secondPaused) "impact peaks aligned at 0" else "right edges aligned"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (latestReceiveGapMs != null && latestReceiveGapMs > 100L) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+                CollisionChart(
+                    firstPoints = if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
+                    secondPoints = if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
+                    firstZero = firstZero,
+                    secondZero = secondZero,
+                    collisionAlongX = collisionAlongX,
+                    timeWindowMs = windowMs,
+                    impactAnchors = if (firstPaused && secondPaused) capturedPeakTimes else null,
+                    cursorEnabled = cursorEnabled,
+                    modifier = Modifier.fillMaxWidth().weight(1f)
                 )
+                Column(Modifier.fillMaxWidth().heightIn(max = controlsMaxHeight).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    NewtonSettingCard {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)) {
+                            Text("Time Window: ${timeWindowOptions.minByOrNull { abs(it.seconds - timeWindowSec) }?.label ?: "10 ms"}",
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            val index = timeWindowOptions.indices.minByOrNull { abs(timeWindowOptions[it].seconds - timeWindowSec) } ?: 0
+                            Slider(
+                                value = index.toFloat(),
+                                onValueChange = { setTimeWindow(timeWindowOptions[it.roundToLong().toInt().coerceIn(0, timeWindowOptions.lastIndex)].seconds) },
+                                valueRange = 0f..timeWindowOptions.lastIndex.toFloat(),
+                                steps = timeWindowOptions.size - 2,
+                                modifier = Modifier.height(30.dp)
+                            )
+                        }
+                    }
+                    NewtonCollapsibleCard("Sensor Calibration (High-G Zero)", if (zeroed) "Both sensors zeroed" else "Tap to zero both sensors",
+                        calibrationExpanded, { calibrationExpanded = !calibrationExpanded }) {
+                            Text("Keep both strikers still, then zero both X/Y baselines.", style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = {
+                                firstZero = zeroFrom(firstData.highG)
+                                secondZero = zeroFrom(secondData.highG)
+                                zeroed = true
+                            }, enabled = bothConnected && firstData.highG.isNotEmpty() && secondData.highG.isNotEmpty()) {
+                                Text("Zero both sensors")
+                            }
+                    }
+                    NewtonCollapsibleCard("Sensor Sampling Rate and Range", "High-G · ${highGOdrOptions.find { it.suffix == highGOdr }?.label ?: highGOdr} · ${highGRangeOptions.find { it.suffix == highGRange }?.label ?: highGRange}",
+                        samplingExpanded, { samplingExpanded = !samplingExpanded }) {
+                            Text("High-G Accel", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            CompactOdrDropdown("High-G", highGOdrOptions.filter { it.suffix != "off" }, highGOdr, true) {
+                                first.setHighGOdr(it)
+                                second.setHighGOdr(it)
+                            }
+                            CompactRangeDropdown("High-G", highGRangeOptions, highGRange, true) {
+                                first.setHighGRange(it)
+                                second.setHighGRange(it)
+                            }
+                    }
+                    NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · ${triggerDelayMs} ms" else "Disabled",
+                        triggerExpanded, { triggerExpanded = !triggerExpanded }) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                Text("Enable Auto-Trigger", style = MaterialTheme.typography.bodySmall)
+                                Switch(checked = triggerEnabled, onCheckedChange = {
+                                    first.setAutoTriggerEnabled(it)
+                                    second.setAutoTriggerEnabled(it)
+                                })
+                            }
+                            Text("Condition", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                listOf("Above", "Below", "Deviation").forEach { condition ->
+                                    FilterChip(triggerCondition == condition, onClick = {
+                                        first.setAutoTriggerCondition(condition)
+                                        second.setAutoTriggerCondition(condition)
+                                    }, label = { Text(condition) })
+                                }
+                            }
+                            OutlinedTextField(
+                                value = thresholdText,
+                                onValueChange = { entered ->
+                                    thresholdText = entered
+                                    entered.toFloatOrNull()?.takeIf { it >= 0f }?.let {
+                                        first.setAutoTriggerThreshold(it)
+                                        second.setAutoTriggerThreshold(it)
+                                    }
+                                },
+                                label = { Text("Threshold (g)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text("Post-trigger delay: $triggerDelayMs ms (½ time window)", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
         }
     }
