@@ -190,6 +190,17 @@ val gyroOdrOptions = listOf(
 
 @SuppressLint("MissingPermission")
 class BleViewModel : ViewModel() {
+    internal val pairedCollision = PairedCollisionController()
+    // Keep the last observed epoch even when chart histories are cleared.
+    @Volatile internal var latestAcquisitionEpoch: Pair<Long, Long>? = null
+        private set
+    @Volatile internal var onPairedStreamInterrupted: ((String) -> Unit)? = null
+    @Volatile internal var onPairedSegmentChanged: (() -> Unit)? = null
+    @Volatile internal var onPairedHighGBatch: ((List<AxisPoint>) -> Unit)? = null
+    internal fun cancelPendingCaptureTrigger() = invalidatePendingTrigger()
+    internal fun setCapturePaused(paused: Boolean) {
+        if (_isPaused.value != paused) togglePause()
+    }
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
     private val _connectedDevice = MutableStateFlow<String?>(null)
@@ -239,6 +250,7 @@ class BleViewModel : ViewModel() {
     }
 
     private fun resetSession() {
+        onPairedStreamInterrupted?.invoke("Device history was cleared.")
         acquisitionTimeline.reset()
         invalidatePendingTrigger()
         timingGapSamples = 0; timingRejected = 0; timingDiscontinuities = 0; lastTimingProtocol = 0
@@ -381,24 +393,24 @@ class BleViewModel : ViewModel() {
     private val _autoTriggerDelayMs = MutableStateFlow(200L)
     val autoTriggerDelayMs: StateFlow<Long> = _autoTriggerDelayMs
 
-    private var isTriggerPending = false
-    private var triggerGeneration = 0L
+    @Volatile private var isTriggerPending = false
+    private val triggerGeneration = java.util.concurrent.atomic.AtomicLong(0L)
     private fun invalidatePendingTrigger() {
-        triggerGeneration++
+        triggerGeneration.incrementAndGet()
         isTriggerPending = false
         isBaselineInitialized = false
     }
-    var onThresholdCrossed: (() -> Unit)? = null
+    @Volatile var onThresholdCrossed: (() -> Unit)? = null
     var onAutoTriggerPending: (() -> Unit)? = null
     var onAutoTriggerCapture: (() -> Unit)? = null
     private var baselineX = 0f; private var baselineY = 0f; private var baselineZ = 0f; private var isBaselineInitialized = false
 
     fun schedulePause(delayMs: Long) {
+        val generation = triggerGeneration.get()
         if (_connectionState.value != ConnectionState.Connected || _isPaused.value || isTriggerPending) return
         isTriggerPending = true
-        val generation = triggerGeneration
         Handler(Looper.getMainLooper()).postDelayed({
-            if (generation != triggerGeneration) return@postDelayed
+            if (generation != triggerGeneration.get()) return@postDelayed
             if (!_isPaused.value) {
                 togglePause()
                 Log.i(BLE_TAG, "Auto-trigger pause executed.")
@@ -430,6 +442,7 @@ class BleViewModel : ViewModel() {
     }
 
     private fun checkAutoTrigger(points: List<AxisPoint>) {
+        val triggerEpoch = triggerGeneration.get()
         if (!_isAutoTriggerEnabled.value || _isPaused.value || isTriggerPending) return
         val axis = _autoTriggerAxis.value
         val condition = _autoTriggerCondition.value
@@ -472,6 +485,7 @@ class BleViewModel : ViewModel() {
         }
 
         if (triggered) {
+            if (triggerEpoch != triggerGeneration.get()) return
             val custom = onThresholdCrossed
             if (custom != null) {
                 custom.invoke()
@@ -480,9 +494,9 @@ class BleViewModel : ViewModel() {
             isTriggerPending = true
             Log.i(BLE_TAG, "Auto-trigger threshold crossed ($condition $threshold on $axis)! Pausing in $delay ms...")
             onAutoTriggerPending?.invoke()
-            val generation = triggerGeneration
+            val generation = triggerEpoch
             Handler(Looper.getMainLooper()).postDelayed({
-                if (generation != triggerGeneration) return@postDelayed
+                if (generation != triggerGeneration.get()) return@postDelayed
                 if (!_isPaused.value) {
                     togglePause()
                     Log.i(BLE_TAG, "Auto-trigger pause executed.")
@@ -560,6 +574,7 @@ class BleViewModel : ViewModel() {
     }
 
     fun setHighGRange(suffix: String) {
+        if (_highGRange.value != suffix) onPairedStreamInterrupted?.invoke("High-G range changed.")
         _highGRange.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("range_high_g_$suffix")
@@ -581,6 +596,7 @@ class BleViewModel : ViewModel() {
     }
 
     fun setHighGOdr(suffix: String) {
+        if (_highGOdr.value != suffix) onPairedStreamInterrupted?.invoke("High-G sampling rate changed.")
         _highGOdr.value = suffix
         if (_connectionState.value == ConnectionState.Connected) {
             sendCommand("odr_high_g_$suffix")
@@ -765,12 +781,15 @@ class BleViewModel : ViewModel() {
     )
 
     private var bluetoothGatt: BluetoothGatt? = null
+    private val gattSession = GattSessionGuard()
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
     private var scanner: BluetoothLeScanner? = null
     private var context: Context? = null
 
     private val commandQueue = ArrayDeque<String>()
-    private var isGattBusy = false
+    private val gattWrites = GattWriteGate()
+    private val _connectionError = MutableStateFlow<String?>(null)
+    val connectionError: StateFlow<String?> = _connectionError
     private val mainHandler = Handler(Looper.getMainLooper())
     private val receiveRateTick = object : Runnable {
         override fun run() {
@@ -791,11 +810,19 @@ class BleViewModel : ViewModel() {
         }
     }
     private val gattWriteTimeoutRunnable = Runnable {
-        if (isGattBusy) {
-            Log.w(BLE_TAG, "GATT write timeout — advancing command queue")
-            isGattBusy = false
-            processNextCommand()
+        val operation = gattWrites.label
+        if (gattWrites.timeout()) {
+            failGattOperation("Bluetooth timed out during $operation. Reconnect the device.")
         }
+    }
+
+    private fun failGattOperation(reason: String) {
+        _connectionError.value = reason
+        Log.e(BLE_TAG, "GATT operation failed device=${_connectedDevice.value}: $reason")
+        commandQueue.clear()
+        mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+        onPairedStreamInterrupted?.invoke(reason)
+        disconnect() // A missing callback must never release a potentially busy ATT client.
     }
 
     private var logFile: File? = null
@@ -813,65 +840,77 @@ class BleViewModel : ViewModel() {
         }
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
+    private fun ownsGatt(gatt: BluetoothGatt, session: Long) =
+        gattSession.owns(session) && gatt.device.address == _connectedDevice.value
+
+    private fun createGattCallback(session: Long) = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (gatt.device.address != _connectedDevice.value) {
-                gatt.close()
-                return
-            }
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                _batteryStatus.value = null
-                _connectionState.value = ConnectionState.Connecting
-                bluetoothGatt = gatt
-                mainHandler.post {
-                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-                    commandQueue.clear()
-                    isGattBusy = false
+            synchronized(this@BleViewModel) {
+                Log.i(BLE_TAG, "GATT state device=${gatt.device.address} session=$session status=$status newState=$newState current=${ownsGatt(gatt, session)}")
+                if (!ownsGatt(gatt, session)) {
+                    gatt.close()
+                    return
                 }
-                // Request the link settings needed for high-rate binary IMU streaming.
-                // Android or the peripheral can negotiate lower values when unsupported.
-                requestFastLinkParams()
-                gatt.setPreferredPhy(
-                    BluetoothDevice.PHY_LE_2M_MASK,
-                    BluetoothDevice.PHY_LE_2M_MASK,
-                    BluetoothDevice.PHY_OPTION_NO_PREFERRED
-                )
-                gatt.requestMtu(PREFERRED_BLE_MTU)
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                invalidatePendingTrigger()
-                _batteryStatus.value = null
-                _connectedDevice.value = null
-                _connectedDeviceName.value = null
-                _connectionState.value = ConnectionState.Disconnected
-                _isPaused.value = false
-                _receivedSamplesPerSecond.value = 0
-                _lastActiveSamplesPerSecond.value = 0
-                _firmwareDiagnostics.value = null
-                _firmwareRates.value = null
-                mainHandler.post {
-                    mainHandler.removeCallbacks(receiveRateTick)
-                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-                    commandQueue.clear()
-                    isGattBusy = false
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    _batteryStatus.value = null
+                    _connectionState.value = ConnectionState.Connecting
+                    bluetoothGatt = gatt
+                    mainHandler.post {
+                        if (!ownsGatt(gatt, session)) return@post
+                        mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                        commandQueue.clear()
+                        gattWrites.reset()
+                    }
+                    // Request the link settings needed for high-rate binary IMU streaming.
+                    // Android or the peripheral can negotiate lower values when unsupported.
+                    requestFastLinkParams(gatt, session)
+                    gatt.setPreferredPhy(
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                    )
+                    gatt.requestMtu(PREFERRED_BLE_MTU)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    onPairedStreamInterrupted?.invoke("A device disconnected.")
+                    invalidatePendingTrigger()
+                    _batteryStatus.value = null
+                    _connectedDevice.value = null
+                    _connectedDeviceName.value = null
+                    _connectionState.value = ConnectionState.Disconnected
+                    _isPaused.value = false
+                    _receivedSamplesPerSecond.value = 0
+                    _lastActiveSamplesPerSecond.value = 0
+                    _firmwareDiagnostics.value = null
+                    _firmwareRates.value = null
+                    mainHandler.post {
+                        if (!gattSession.owns(session)) return@post
+                        mainHandler.removeCallbacks(receiveRateTick)
+                        mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                        commandQueue.clear()
+                        gattWrites.reset()
+                    }
+                    gatt.close()
+                    bluetoothGatt = null
+                    rxCharacteristic = null
                 }
-                bluetoothGatt?.close()
-                bluetoothGatt = null
-                rxCharacteristic = null
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (!ownsGatt(gatt, session)) return
             Log.i(BLE_TAG, "MTU negotiated: $mtu bytes (status=$status)")
             gatt.discoverServices()
         }
 
         override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            if (!ownsGatt(gatt, session)) return
             Log.i(BLE_TAG,
                 "PHY negotiated: tx=$txPhy (2M=${txPhy == BluetoothDevice.PHY_LE_2M}) " +
                 "rx=$rxPhy (2M=${rxPhy == BluetoothDevice.PHY_LE_2M}) status=$status")
         }
 
         override fun onPhyRead(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            if (!ownsGatt(gatt, session)) return
             Log.i(BLE_TAG,
                 "PHY read: tx=$txPhy (2M=${txPhy == BluetoothDevice.PHY_LE_2M}) " +
                 "rx=$rxPhy (2M=${rxPhy == BluetoothDevice.PHY_LE_2M}) status=$status")
@@ -879,68 +918,73 @@ class BleViewModel : ViewModel() {
 
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt.getService(SERVICE_UUID)
-                if (service != null) {
-                    rxCharacteristic = service.getCharacteristic(RX_CHAR_UUID)
-                    val txChar = service.getCharacteristic(TX_CHAR_UUID)
-
-                    var descriptorWriteStarted = false
-                    if (txChar != null) {
-                        gatt.setCharacteristicNotification(txChar, true)
-                        val descriptor = txChar.getDescriptor(CCCD_UUID)
-                        if (descriptor != null) {
-                            isGattBusy = true
-                            descriptorWriteStarted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
-                            } else {
-                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                gatt.writeDescriptor(descriptor)
-                            }
-                            if (descriptorWriteStarted) {
-                                mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-                                mainHandler.postDelayed(gattWriteTimeoutRunnable, 350L)
-                            } else {
-                                isGattBusy = false
-                            }
-                        }
-                    }
-                    _connectionState.value = ConnectionState.Connected
-                    resetSession()
-                    mainHandler.post {
-                        mainHandler.removeCallbacks(receiveRateTick)
-                        mainHandler.postDelayed(receiveRateTick, SAMPLE_RATE_UPDATE_INTERVAL_MS)
-                    }
-                    // Synchronize all active sensor settings (Pause/Resume, Ranges, ODRs, and Stream Mode)
-                    // through the serialized GATT command queue once CCCD write finishes.
-                    syncFullConfigurationToDevice()
-                } else {
-                    disconnect()
+            mainHandler.post {
+                if (!ownsGatt(gatt, session)) return@post
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failGattOperation("Bluetooth service discovery failed ($status). Reconnect the device.")
+                    return@post
                 }
+                val service = gatt.getService(SERVICE_UUID)
+                val rx = service?.getCharacteristic(RX_CHAR_UUID)
+                val tx = service?.getCharacteristic(TX_CHAR_UUID)
+                val cccd = tx?.getDescriptor(CCCD_UUID)
+                if (rx == null || tx == null || cccd == null || !gatt.setCharacteristicNotification(tx, true)) {
+                    failGattOperation("Bluetooth notification setup is unavailable. Reconnect the device.")
+                    return@post
+                }
+                rxCharacteristic = rx
+                if (!gattWrites.begin(GattWriteGate.Kind.SUBSCRIPTION, "notification setup")) return@post
+                val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
+                } else {
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(cccd)
+                }
+                if (!started) {
+                    gattWrites.complete(GattWriteGate.Kind.SUBSCRIPTION, false)
+                    failGattOperation("Android refused notification setup. Reconnect the device.")
+                    return@post
+                }
+                mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                mainHandler.postDelayed(gattWriteTimeoutRunnable, 10_000L)
             }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            Log.i(BLE_TAG, "Descriptor write completed: uuid=${descriptor.uuid} status=$status")
             mainHandler.post {
+                if (!ownsGatt(gatt, session) || descriptor.uuid != CCCD_UUID) return@post
+                if (!gattWrites.complete(GattWriteGate.Kind.SUBSCRIPTION, status == BluetoothGatt.GATT_SUCCESS)) return@post
                 mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-                isGattBusy = false
-                processNextCommand()
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failGattOperation("Bluetooth notification setup failed ($status). Reconnect the device.")
+                    return@post
+                }
+                Log.i(BLE_TAG, "Notifications ready device=${gatt.device.address} session=$session")
+                _connectionState.value = ConnectionState.Connected
+                resetSession()
+                mainHandler.removeCallbacks(receiveRateTick)
+                mainHandler.postDelayed(receiveRateTick, SAMPLE_RATE_UPDATE_INTERVAL_MS)
+                syncFullConfigurationToDevice()
             }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (characteristic.uuid == RX_CHAR_UUID) {
-                Log.d(BLE_TAG, "RX characteristic write completed (status=$status)")
-                mainHandler.post {
-                    mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-                    isGattBusy = false
-                    processNextCommand()
+            mainHandler.post {
+                if (!ownsGatt(gatt, session) || characteristic.uuid != RX_CHAR_UUID) return@post
+                val operation = gattWrites.label
+                if (!gattWrites.complete(GattWriteGate.Kind.COMMAND, status == BluetoothGatt.GATT_SUCCESS)) return@post
+                mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
+                Log.d(BLE_TAG, "RX write device=${gatt.device.address} command=$operation status=$status")
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failGattOperation("Bluetooth command '$operation' failed ($status). Reconnect the device.")
+                    return@post
                 }
+                processNextCommand()
             }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            if (!ownsGatt(gatt, session)) return
             if (gatt !== bluetoothGatt) return
             if (characteristic.uuid == TX_CHAR_UUID) {
                 handleIncomingData(value)
@@ -949,6 +993,7 @@ class BleViewModel : ViewModel() {
 
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (!ownsGatt(gatt, session)) return
             if (gatt !== bluetoothGatt) return
             if (characteristic.uuid == TX_CHAR_UUID) {
                 val v = characteristic.value ?: return
@@ -962,11 +1007,12 @@ class BleViewModel : ViewModel() {
      * Many Android devices ignore a priority request issued immediately on
      * connect, so it is retried once shortly afterwards when the link is stable.
      */
-    private fun requestFastLinkParams() {
-        val first = bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) == true
+    private fun requestFastLinkParams(gatt: BluetoothGatt, session: Long) {
+        val first = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
         Log.i(BLE_TAG, "requestConnectionPriority(HIGH) -> $first")
-        Handler(Looper.getMainLooper()).postDelayed({
-            val retry = bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) == true
+        mainHandler.postDelayed({
+            if (!ownsGatt(gatt, session)) return@postDelayed
+            val retry = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
             Log.i(BLE_TAG, "retry requestConnectionPriority(HIGH) -> $retry")
         }, 1500L)
     }
@@ -999,6 +1045,7 @@ class BleViewModel : ViewModel() {
         val decoded = when (val res = PacketDecoder.decode(bytes)) {
             is DecodeResult.Success -> res.packet
             is DecodeResult.Error -> {
+                onPairedStreamInterrupted?.invoke("A device received an invalid packet.")
                 receiveMeter.invalidPacket()
                 Log.w(BLE_TAG, "processBinaryPacket: dropped invalid frame: ${res.reason}")
                 return
@@ -1007,6 +1054,7 @@ class BleViewModel : ViewModel() {
 
         val protocol = if (decoded.timing == null) 1 else 2
         if (lastTimingProtocol != 0 && lastTimingProtocol != protocol) {
+            onPairedStreamInterrupted?.invoke("A device changed timing protocol.")
             invalidatePendingTrigger()
             acquisitionTimeline.reset()
             lowGBuffer.clear(); highGBuffer.clear(); gyroBuffer.clear()
@@ -1017,14 +1065,20 @@ class BleViewModel : ViewModel() {
         lastTimingProtocol = protocol
         val timedBatch = if (decoded.timing != null) acquisitionTimeline.accept(decoded) else null
         if (decoded.timing != null && timedBatch == null) {
+            onPairedStreamInterrupted?.invoke("A device received inconsistent timing.")
             timingRejected++
             receiveMeter.invalidPacket()
             _timingStatus.value = "Rejected duplicate/reordered/inconsistent timing packet ($timingRejected)"
             return
         }
+        latestAcquisitionEpoch = decoded.timing?.let { it.bootId to it.segmentId }
         receiveMeter.record(decoded.sampleCount, decoded.seq)
         lastSamplePacketArrivalMs = SystemClock.elapsedRealtime()
         if (timedBatch != null && (timedBatch.newSegment || timedBatch.discontinuity)) {
+            if (timedBatch.discontinuity) {
+                if (timedBatch.newSegment && decoded.timing!!.flags and 2 == 0) onPairedSegmentChanged?.invoke()
+                else onPairedStreamInterrupted?.invoke("A device lost sample continuity.")
+            }
             invalidatePendingTrigger()
             // Until E011/E012 support intervals across gaps, never connect or
             // analyze the old and new intervals as one continuous record.
@@ -1077,6 +1131,7 @@ class BleViewModel : ViewModel() {
         }
 
         appendBatchPoints(filteredLowG, filteredHighG, filteredGyro)
+        onPairedHighGBatch?.invoke(filteredHighG)
 
         // Human-readable terminal update (throttled to ~10 Hz to prevent UI thread lag)
         val now = System.currentTimeMillis()
@@ -1341,13 +1396,20 @@ class BleViewModel : ViewModel() {
         scanner?.stopScan(scanCallback)
     }
 
-    private fun connectToDevice(discovered: DiscoveredElectrophy) {
+    @Synchronized private fun connectToDevice(discovered: DiscoveredElectrophy) {
         val ctx = context ?: return
+        val session = gattSession.begin()
+        _connectionError.value = null
+        bluetoothGatt?.disconnect()
+        bluetoothGatt?.close()
+        bluetoothGatt = null
+        rxCharacteristic = null
+        Log.i(BLE_TAG, "GATT connect requested device=${discovered.device.address} session=$session")
         _batteryStatus.value = null
         _connectedDevice.value = discovered.device.address
         _connectedDeviceName.value = discovered.name
         _connectionState.value = ConnectionState.Connecting
-        bluetoothGatt = discovered.device.connectGatt(ctx, false, gattCallback)
+        bluetoothGatt = discovered.device.connectGatt(ctx, false, createGattCallback(session))
         if (bluetoothGatt == null) {
             _connectedDevice.value = null
             _connectedDeviceName.value = null
@@ -1355,7 +1417,10 @@ class BleViewModel : ViewModel() {
         }
     }
 
-    fun disconnect() {
+    @Synchronized fun disconnect() {
+        Log.i(BLE_TAG, "GATT disconnect requested device=${_connectedDevice.value}")
+        val stoppedSession = gattSession.invalidate()
+        onPairedStreamInterrupted?.invoke("A device disconnected.")
         invalidatePendingTrigger()
         stopScan()
         _availableDevices.value = emptyList()
@@ -1363,11 +1428,15 @@ class BleViewModel : ViewModel() {
         _connectedDeviceName.value = null
         _isPaused.value = false
         mainHandler.post {
+            if (!gattSession.owns(stoppedSession)) return@post
             mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
             commandQueue.clear()
-            isGattBusy = false
+            gattWrites.reset()
         }
         bluetoothGatt?.disconnect()
+        bluetoothGatt?.close()
+        bluetoothGatt = null
+        rxCharacteristic = null
         _batteryStatus.value = null
         _connectionState.value = ConnectionState.Disconnected
         _receivedSamplesPerSecond.value = 0
@@ -1377,7 +1446,8 @@ class BleViewModel : ViewModel() {
         mainHandler.removeCallbacks(receiveRateTick)
     }
 
-    override fun onCleared() {
+    @Synchronized override fun onCleared() {
+        gattSession.invalidate()
         mainHandler.removeCallbacksAndMessages(null)
         bluetoothGatt?.close()
         super.onCleared()
@@ -1412,6 +1482,7 @@ class BleViewModel : ViewModel() {
     }
 
     fun selectMode(mode: GraphMode) {
+        if (_selectedMode.value != mode) onPairedStreamInterrupted?.invoke("The sensor mode changed.")
         val changed = _selectedMode.value != mode
         _selectedMode.value = mode
         if (changed) clearLogs()
@@ -1646,9 +1717,15 @@ class BleViewModel : ViewModel() {
     fun sendCommand(command: String) {
         val cleanCmd = command.trim()
         if (cleanCmd.isEmpty()) return
+        val session = gattSession.current()
 
         mainHandler.post {
+            if (!gattSession.owns(session)) return@post
             if (_connectionState.value != ConnectionState.Connected) return@post
+            if (commandQueue.size >= 128) {
+                failGattOperation("Too many pending Bluetooth commands. Reconnect the device.")
+                return@post
+            }
             if (commandQueue.lastOrNull() != cleanCmd) {
                 commandQueue.addLast(cleanCmd)
             }
@@ -1657,7 +1734,7 @@ class BleViewModel : ViewModel() {
     }
 
     private fun processNextCommand() {
-        if (isGattBusy) return
+        if (gattWrites.pending != null || gattWrites.failed) return
         if (_connectionState.value != ConnectionState.Connected) {
             commandQueue.clear()
             return
@@ -1672,26 +1749,26 @@ class BleViewModel : ViewModel() {
         }
         val nextCmd = commandQueue.removeFirstOrNull() ?: return
 
-        isGattBusy = true
+        if (!gattWrites.begin(GattWriteGate.Kind.COMMAND, nextCmd)) return
         val bytes = (nextCmd + "\r\n").toByteArray(Charsets.UTF_8)
 
+        var startStatus: Int? = null
         val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+            gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                .also { startStatus = it } == BluetoothStatusCodes.SUCCESS
         } else {
             char.value = bytes
             char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             gatt.writeCharacteristic(char)
         }
 
-        Log.i(BLE_TAG, "Sent BLE command '$nextCmd' (started=$started, remaining=${commandQueue.size})")
+        Log.i(BLE_TAG, "BLE command '$nextCmd' (device=${_connectedDevice.value}, started=$started, startStatus=$startStatus, remaining=${commandQueue.size})")
         if (started) {
             mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
-            mainHandler.postDelayed(gattWriteTimeoutRunnable, 250L)
+            mainHandler.postDelayed(gattWriteTimeoutRunnable, 10_000L)
         } else {
-            // Stack was momentarily busy (e.g. MTU/PHY/CCCD in flight); requeue at head and retry shortly
-            isGattBusy = false
-            commandQueue.addFirst(nextCmd)
-            mainHandler.postDelayed({ processNextCommand() }, 60L)
+            gattWrites.complete(GattWriteGate.Kind.COMMAND, false)
+            failGattOperation("Android refused Bluetooth command '$nextCmd' (${startStatus ?: "legacy API"}). Reconnect the device.")
         }
     }
 }
@@ -1783,6 +1860,7 @@ fun BleAppScreen(
     val context = LocalContext.current
 
     val connectionState by viewModel.connectionState.collectAsState()
+    val connectionError by viewModel.connectionError.collectAsState()
     val availableDevices by viewModel.availableDevices.collectAsState()
     val connectedDevice by viewModel.connectedDevice.collectAsState()
     val connectedDeviceName by viewModel.connectedDeviceName.collectAsState()
@@ -1794,7 +1872,6 @@ fun BleAppScreen(
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
     val diagnosticsEnabled by viewModel.diagnosticsEnabled.collectAsState()
-    val timingStatus by viewModel.timingStatus.collectAsState()
     val firmwareDiagnostics by viewModel.firmwareDiagnostics.collectAsState()
     val firmwareRates by viewModel.firmwareRates.collectAsState()
     val receiveMetrics by viewModel.receiveMetrics.collectAsState()
@@ -2068,7 +2145,10 @@ fun BleAppScreen(
             if (diagnosticsEnabled) {
                 StreamDiagnosticsPanel(firmwareDiagnostics, firmwareRates, receiveMetrics)
             }
-            Text(timingStatus, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall)
+            connectionError?.let {
+                Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error)
+            }
 
             // Graph mode selector
             Row(

@@ -125,7 +125,7 @@ val experimentModes: List<ExperimentMode> = listOf(
         filterEnabled = false,
         chartTitle = "Signed planar acceleration",
         yAxisUnit = "g",
-        instructions = "1. Connect both ElectroPhy devices from Raw Data\n2. Mount one on each striker with the sensor X and Y axes aligned the same way\n3. Select the collision axis and tap Zero while both strikers are still\n4. Send one striker toward the other along the chosen positive axis\n5. Compare the positive and negative acceleration pulses; similar total striker masses give similar peak sizes"
+        instructions = "1. Connect both ElectroPhy devices from Raw Data\n2. Mount one on each striker with X/Y axes aligned the same way\n3. Select the collision axis and zero both sensors while still\n4. Perform a collision; auto-trigger pauses the pair, or tap Pause yourself. Tap Resume to stream again\n5. Compare peak-aligned acceleration waveforms. Peak alignment does not synchronize clocks; equal forces can produce different accelerations for different masses"
     ),
     ExperimentMode(
         id = "free_fall",

@@ -1,5 +1,7 @@
 # Electrophy app audit and indexed implementation plan
 
+Latest verification (6 November 2026): all 82 Android JVM tests passed and the debug APK was built. After installing the Bluetooth write-queue fix, the user reported that the repeated connection issue appears resolved. This is a successful device retest of the reported regression; broader E010 qualification remains incomplete.
+
 Reviewed: **11 October 2026**. Source baseline: repository commit `3262790` plus the files present during review. This is an audit and implementation specification, not a claim that the tasks below have been implemented.
 
 ## Verdict and scope
@@ -690,6 +692,150 @@ Remaining limitations and follow-up task IDs:
 ```
 
 ### Log entries
+
+```text
+Task: E010 stalled GATT command / retry storm follow-up
+Date: 2026-11-06
+Evidence:
+- User Logcat shows high_acc started=false every ~60 ms, then characteristic-write
+  status 133 and a real GATT state disconnect (status 22). No firmware reset cause
+  was supplied; radio/peripheral failure is not inferred from these codes alone.
+Cause in app queue:
+- The 250 ms command / 350 ms descriptor timeout released an unfinished GATT
+  operation and advanced commands despite Android potentially still being busy.
+- Failed write starts were unconditionally requeued after 60 ms; callback status
+  was ignored, and Connected could be shown before subscription completed.
+Changes:
+- GattWriteGate serializes subscription/command completion; failure blocks reuse
+  until the connection is reset. A timeout never counts as successful completion.
+- Ten-second callback deadline; refusal/failure/missing completion stops that
+  session once with a reconnect message. No repeated started=false retry loop.
+- Only a successful CCCD completion starts configuration and marks Connected.
+  Validate required RX/TX/CCCD and actual subscription initiation.
+- Pending commands and teardown carry session identity; command queue bounded
+  to 128 entries. Preserve per-device callback ownership and guard failed sessions.
+- Newton initial streaming no longer sends an extra pause/resume cycle. Explicit
+  operator Pause/Resume remains. Real control failures show a short actionable error.
+- Include device and numeric write-start status in existing command logs.
+Verification:
+- Added five GattWriteGate JVM fixtures for delayed/missing callbacks, subscription
+  ordering, status/refusal failure, blocked retries, and independent device owners.
+- Physical Android/BLE retest required; no firmware change or link-stability claim.
+- E010 overall remains incomplete (full lifecycle/API/hardware qualification and
+  applied-device-configuration acknowledgement are still separate work).
+```
+
+```text
+Task: Newton startup callback crash / E010 session ownership
+Date: 2026-11-06
+Status: Reported notification exception fixed; real link-disconnect cause unconfirmed
+Evidence:
+- User Logcat shows repeated NullPointerException in PairedCollisionController.accept
+  line 201, delivered through Android's BLE notification callback. It does not show
+  an actual GATT-disconnect status or firmware disconnect reason.
+Cause and fix:
+- Manual-zero compatibility initializes both zero offsets before both devices have
+  samples. The readiness predicate wrongly assumed a non-null zero also implied a
+  non-null last timestamp. Device 2 arriving first, or device 1 accumulating enough
+  history before device 2, dereferenced a null timestamp.
+- Readiness now checks each stream's actual first/last timestamps before comparing
+  history duration. Both arrival orders and startup segment resets are tested.
+- Separate hardening: each connection gets a generation-bound callback; stale
+  callbacks/queued GATT completions/retries cannot operate on a later session at
+  the same device address. Disconnect/disposal invalidate the owner; replacement
+  connections release the previous GATT. Lifecycle mutations are serialized.
+- Added low-frequency ElectrophyBLE GATT state logs with device/session/status;
+  no per-sample logging or UI debug footer. Two similar command lines can be the
+  expected one-per-device configuration writes, not a reconnect loop.
+Verification:
+- Android testDebugUnitTest passed: 77 tests, zero failures/errors; assembleDebug passed.
+- JVM tests cover the reported asymmetric-arrival crash and stale-session ownership;
+  actual Android BLE/firmware disconnect behavior still requires device retesting.
+- No firmware change. E010's broader readiness/operation-completion work remains open.
+```
+
+```text
+Task: Newton threshold-pause / peak-alignment regression fix
+Date: 2026-11-06
+Status: Original automatic threshold interaction restored; physical retest pending
+Cause:
+- Restoring Pause/Resume buttons alone left controller baseline/prehistory readiness
+  gates in the automatic trigger path; VM threshold callbacks were still no-ops.
+- Alignment/zoom required a completed controller snapshot, so blocked thresholding
+  or an early manual pause prevented the earlier peak/zoom behavior too.
+Fix:
+- Restore actual High-G threshold callbacks, a shared three-second coincidence
+  window, and the configured delayed pause on both devices. On both-paused state,
+  freeze current continuous data, independently align displayed-signal peaks, and
+  zoom to 10 ms. No baseline/prehistory gate blocks these threshold callbacks.
+- Use operator zero offsets (default zero) instead of relearning an impact as a
+  stationary baseline. Manual Pause also works before readiness conditions.
+- Use the same signed planar signal for anchor selection and plotting, and search
+  recent retained history up to ten seconds, as the earlier screen did.
+- Retain gap/disconnect/configuration invalidation and old-callback/segment guards.
+- The production pause delay is phone-timed again, as explicitly preferred by the
+  user; v2 still supplies sample timestamps for plotting. Sample-exact endpoints
+  and synchronized clocks are not claimed. This supersedes earlier workflow logs.
+Tests:
+- Added fixtures for immediate threshold callbacks, one-time paired pause scheduling,
+  expired/old crossing isolation, and perpendicular-motion peak-anchor regression.
+- testDebugUnitTest passed: 73 tests, zero failures/errors. assembleDebug passed.
+- Hardware/UI threshold-pause/alignment/zoom retest still required; no firmware change.
+```
+
+```text
+Task: Newton paired-capture workflow adjustment
+Date: 2026-11-05
+Status: Pause/Resume user flow restored following device feedback
+Behavior:
+- Restore Pause/Resume and automatic streaming on connection; remove New run/Ready
+  workflow from the main screen. Keep Clear and Zero both sensors controls.
+- Manual Pause freezes both current continuous windows without claiming a completed
+  automatic event; auto-trigger still uses paired sample-time endpoints.
+- Keep shared interruption, old-segment rejection, fresh-baseline, and cancellation
+  protections. Show interruption errors only; previous capture recall lives inside
+  the expanded Instructions & Setup card.
+- Earlier paired-controller log describes the initial UI, superseded by this entry.
+Verification:
+- Android testDebugUnitTest passed: 69 tests, zero failures/errors; assembleDebug passed.
+- Manual-pause fixtures cover continuous-window freezing and rejection of interrupted
+  pairs. No new physical-device/UI verification performed after this adjustment.
+```
+
+```text
+Task: E011 / E019 / E028 paired Newton capture follow-up
+Date: 2026-11-05
+Status: Paired run ownership implemented; broader tasks remain partial/open
+Changed files:
+- Electrophy_app: PairedCollisionController.kt, NewtonsThirdLawScreen.kt,
+  MainActivity.kt, ExperimentModes.kt, PairedCollisionControllerTest.kt
+- Electrophy_app/PAIRED_COLLISION_CAPTURE.md
+Behavior:
+- One shared state machine owns baseline/armed/capturing/complete/interrupted state.
+- Both devices require fresh contiguous v2 High-G intervals. Gaps, invalid data,
+  disconnects, configuration changes, and timeouts invalidate an unfinished pair.
+- Fresh runs cancel old triggers, request new stream segments, reject known old
+  queued segments, and collect new stationary baselines/prehistory before arming.
+- Event endpoints use per-device sample timestamps. Both intervals must complete
+  before creating an immutable pair and pausing; a single paused device cannot
+  cause old live peaks to be paired. Cross-device peak alignment remains explicitly
+  a display comparison, not clock synchronization or force verification.
+- Preserve the latest completed pair (including baselines and device identities)
+  through Clear, later failures, live eviction, and navigation while ViewModels live.
+- Atomic trigger-generation cancellation prevents delayed callbacks surviving a
+  restart. Lifecycle effects check run identity before pausing a newly started run.
+- Clear/New run/Stop and previous-capture recall replace ambiguous paired Resume.
+Verification and limits:
+- Dedicated deterministic JVM fixtures cover paired completion/interruption,
+  missing/reordered data, boot/segment startup/reset, saved-pair preservation,
+  unmatched/stale stream expiry, baseline checks, history limits, old queued data,
+  and sample-time boundary invariance under different deliveries.
+- testDebugUnitTest passed: 67 total tests, including 12 paired-controller tests,
+  zero failures/errors. assembleDebug passed; rebuilt APK available.
+- Hardware/UI verification not performed. Follow PAIRED_COLLISION_CAPTURE.md.
+- No firmware changes. No synchronized clocks, mass/force computation, persistent
+  saved-run browser, or general-purpose E011/E019 completion is claimed.
+```
 
 ```text
 Task: E003 verification cleanup

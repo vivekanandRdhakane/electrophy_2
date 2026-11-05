@@ -31,30 +31,9 @@ import kotlin.math.hypot
 import kotlin.math.roundToLong
 import java.util.Locale
 
-private data class PlanarZero(val x: Float = 0f, val y: Float = 0f)
-
-private fun zeroFrom(points: List<AxisPoint>): PlanarZero {
-    val recent = points.takeLast(100)
-    if (recent.isEmpty()) return PlanarZero()
-    return PlanarZero(recent.map { it.x }.average().toFloat(), recent.map { it.y }.average().toFloat())
-}
-
 /** The sign comes from the shared collision axis, never from whichever component is larger. */
 private fun signedPlanarG(point: AxisPoint, zero: PlanarZero, collisionAlongX: Boolean): Float {
-    val x = point.x - zero.x
-    val y = point.y - zero.y
-    val magnitude = hypot(x, y)
-    val along = if (collisionAlongX) x else y
-    if (abs(along) < magnitude * 0.05f) return 0f
-    return if (along >= 0f) magnitude else -magnitude
-}
-
-private fun impactPeakTime(points: List<AxisPoint>, zero: PlanarZero, collisionAlongX: Boolean,
-                           timeWindowMs: Float): Float? {
-    val latest = points.lastOrNull()?.time ?: return null
-    return points.asReversed().asSequence()
-        .takeWhile { it.time >= latest - timeWindowMs }
-        .maxByOrNull { abs(signedPlanarG(it, zero, collisionAlongX)) }?.time
+    return collisionSignedPlanarG(point, zero, collisionAlongX)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +46,8 @@ fun NewtonsThirdLawScreen(
 ) {
     val firstState by first.connectionState.collectAsState()
     val secondState by second.connectionState.collectAsState()
+    val firstConnectionError by first.connectionError.collectAsState()
+    val secondConnectionError by second.connectionError.collectAsState()
     val firstName by first.connectedDeviceName.collectAsState()
     val secondName by second.connectedDeviceName.collectAsState()
     val firstData by first.chartData.collectAsState()
@@ -81,100 +62,147 @@ fun NewtonsThirdLawScreen(
     val firstPaused by first.isPaused.collectAsState()
     val secondPaused by second.isPaused.collectAsState()
     var collisionAlongX by remember { mutableStateOf(true) }
-    var firstZero by remember { mutableStateOf(PlanarZero()) }
-    var secondZero by remember { mutableStateOf(PlanarZero()) }
+    var firstManualZero by remember { mutableStateOf(PlanarZero()) }
+    var secondManualZero by remember { mutableStateOf(PlanarZero()) }
+    var hasManualZero by remember { mutableStateOf(false) }
     var instructionsExpanded by remember { mutableStateOf(false) }
-    var zeroed by remember { mutableStateOf(false) }
     var thresholdText by remember { mutableStateOf("5") }
     var calibrationExpanded by remember { mutableStateOf(false) }
     var samplingExpanded by remember { mutableStateOf(false) }
     var triggerExpanded by remember { mutableStateOf(false) }
-    var capturedPeakTimes by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    val pair = remember(first, second) { first.pairedCollision }
+    val run by pair.state.collectAsState()
+    var showPrevious by remember { mutableStateOf(false) }
     var cursorEnabled by remember { mutableStateOf(false) }
-
-    var firstCrossedTime by remember { mutableLongStateOf(0L) }
-    var secondCrossedTime by remember { mutableLongStateOf(0L) }
-    var dualTriggerFired by remember { mutableStateOf(false) }
-
-    LaunchedEffect(mode.id) {
-        first.applyExperimentMode(mode)
-        second.applyExperimentMode(mode)
-    }
-    DisposableEffect(first, second) {
-        val COINCIDENCE_WINDOW_MS = 3000L
-
-        fun checkBothCrossed() {
-            if (dualTriggerFired || first.isPaused.value || second.isPaused.value) return
-            val now = SystemClock.uptimeMillis()
-            val firstValid = firstCrossedTime > 0L && (now - firstCrossedTime) <= COINCIDENCE_WINDOW_MS
-            val secondValid = secondCrossedTime > 0L && (now - secondCrossedTime) <= COINCIDENCE_WINDOW_MS
-            if (firstValid && secondValid) {
-                dualTriggerFired = true
-                val delay = maxOf(first.autoTriggerDelayMs.value, second.autoTriggerDelayMs.value)
-                first.schedulePause(delay)
-                second.schedulePause(delay)
-            }
-        }
-
-        first.onThresholdCrossed = {
-            if (!dualTriggerFired && !first.isPaused.value && !second.isPaused.value) {
-                firstCrossedTime = SystemClock.uptimeMillis()
-                checkBothCrossed()
-            }
-        }
-        second.onThresholdCrossed = {
-            if (!dualTriggerFired && !first.isPaused.value && !second.isPaused.value) {
-                secondCrossedTime = SystemClock.uptimeMillis()
-                checkBothCrossed()
-            }
-        }
-        onDispose {
-            first.onThresholdCrossed = null
-            second.onThresholdCrossed = null
-            first.onAutoTriggerPending = null
-            second.onAutoTriggerPending = null
-            first.onAutoTriggerCapture = null
-            second.onAutoTriggerCapture = null
-        }
-    }
-
+    var autoStartPending by remember { mutableStateOf(true) }
+    val frozen = run.completed?.takeIf { run.phase == PairPhase.COMPLETE || showPrevious }
+    val firstZero = frozen?.first?.baseline ?: run.firstZero
+    val secondZero = frozen?.second?.baseline ?: run.secondZero
+    val capturedPeakTimes = frozen?.let { it.first.peakTime to it.second.peakTime }
+    val postImpactMs = frozen?.postNs?.div(1_000_000) ?: triggerDelayMs
+    val zeroed = hasManualZero
     val bothConnected = firstState == ConnectionState.Connected && secondState == ConnectionState.Connected
+    val running = run.phase in setOf(PairPhase.BASELINE, PairPhase.ARMED, PairPhase.CAPTURING)
     val windowMs = timeWindowSec * 1000f
 
     fun setTimeWindow(seconds: Float) {
-        val delayMs = (seconds * 500f).roundToLong()
         first.setTimeWindow(seconds)
         second.setTimeWindow(seconds)
+        val delayMs = (seconds * 500f).roundToLong()
         first.setAutoTriggerDelayMs(delayMs)
         second.setAutoTriggerDelayMs(delayMs)
     }
 
+    fun stopRun(reason: String) {
+        pair.interrupt(reason)
+        first.cancelPendingCaptureTrigger()
+        second.cancelPendingCaptureTrigger()
+        first.setCapturePaused(true)
+        second.setCapturePaused(true)
+    }
+
+    fun startRun(forceFreshSegment: Boolean = true) {
+        if (!bothConnected) return
+        autoStartPending = false
+        val previousEpochs = if (forceFreshSegment) listOf(first.latestAcquisitionEpoch, second.latestAcquisitionEpoch)
+            else listOf(null, null)
+        pair.interrupt("Starting a fresh run.")
+        first.cancelPendingCaptureTrigger()
+        second.cancelPendingCaptureTrigger()
+        showPrevious = false
+        cursorEnabled = false
+        if (timeWindowSec < 1f) setTimeWindow(3f)
+        if (forceFreshSegment) {
+            first.setCapturePaused(true)
+            second.setCapturePaused(true)
+        }
+        first.clearLogs()
+        second.clearLogs()
+        first.setCapturePaused(false)
+        second.setCapturePaused(false)
+        val halfWindowNs = (first.timeWindowSec.value * 500_000_000.0).toLong()
+        pair.start(PairSettings(collisionAlongX, first.autoTriggerCondition.value,
+            first.autoTriggerThreshold.value, halfWindowNs, halfWindowNs,
+            false, firstName ?: "Device 1", secondName ?: "Device 2",
+            collectBaseline = false, firstZero = firstManualZero, secondZero = secondManualZero),
+            SystemClock.elapsedRealtime(), previousEpochs)
+    }
+
     fun setAxis(alongX: Boolean) {
+        stopRun("Collision direction changed.")
         collisionAlongX = alongX
         val axis = if (alongX) "X" else "Y"
         first.setAutoTriggerAxis(axis)
         second.setAutoTriggerAxis(axis)
     }
 
-    LaunchedEffect(firstPaused, secondPaused) {
-        if (!firstPaused || !secondPaused) {
-            cursorEnabled = false
-            dualTriggerFired = false
-            firstCrossedTime = 0L
-            secondCrossedTime = 0L
+    LaunchedEffect(mode.id) {
+        first.applyExperimentMode(mode)
+        second.applyExperimentMode(mode)
+    }
+    DisposableEffect(first, second, pair) {
+        // Keep the original threshold -> delayed paired pause interaction.
+        // The controller owns crossing identity/cancellation, without readiness gates.
+        fun thresholdCrossed(device: Int) {
+            if (pair.thresholdCrossed(device, SystemClock.elapsedRealtime())) {
+                val delayMs = maxOf(first.autoTriggerDelayMs.value, second.autoTriggerDelayMs.value)
+                first.schedulePause(delayMs)
+                second.schedulePause(delayMs)
+            }
+        }
+        first.onThresholdCrossed = { thresholdCrossed(0) }
+        second.onThresholdCrossed = { thresholdCrossed(1) }
+        first.onPairedStreamInterrupted = { pair.interrupt("Device 1: $it") }
+        second.onPairedStreamInterrupted = { pair.interrupt("Device 2: $it") }
+        first.onPairedSegmentChanged = { pair.streamChanged(0, "Device 1 changed its data segment.") }
+        second.onPairedSegmentChanged = { pair.streamChanged(1, "Device 2 changed its data segment.") }
+        first.onPairedHighGBatch = { pair.accept(0, it, SystemClock.elapsedRealtime()) }
+        second.onPairedHighGBatch = { pair.accept(1, it, SystemClock.elapsedRealtime()) }
+        onDispose {
+            val active = pair.state.value.phase in setOf(PairPhase.BASELINE, PairPhase.ARMED, PairPhase.CAPTURING)
+            pair.interrupt("Experiment closed.")
+            first.cancelPendingCaptureTrigger()
+            second.cancelPendingCaptureTrigger()
+            first.onThresholdCrossed = null
+            second.onThresholdCrossed = null
+            first.onPairedStreamInterrupted = null
+            second.onPairedStreamInterrupted = null
+            first.onPairedSegmentChanged = null
+            second.onPairedSegmentChanged = null
+            first.onPairedHighGBatch = null
+            second.onPairedHighGBatch = null
+            if (active) { first.setCapturePaused(true); second.setCapturePaused(true) }
         }
     }
-
-    LaunchedEffect(firstPaused, secondPaused, collisionAlongX, firstZero, secondZero,
-        firstData.highG.isEmpty(), secondData.highG.isEmpty()) {
-        capturedPeakTimes = if (firstPaused && secondPaused) {
-            val firstPeak = impactPeakTime(first.chartData.value.highG, firstZero, collisionAlongX, 10000f)
-            val secondPeak = impactPeakTime(second.chartData.value.highG, secondZero, collisionAlongX, 10000f)
-            if (firstPeak != null && secondPeak != null) {
-                setTimeWindow(0.010f)
-                firstPeak to secondPeak
-            } else null
-        } else null
+    LaunchedEffect(pair) {
+        while (true) {
+            kotlinx.coroutines.delay(250)
+            pair.tick(SystemClock.elapsedRealtime())
+        }
+    }
+    LaunchedEffect(firstPaused, secondPaused, run.runId) {
+        if (firstPaused && secondPaused && pair.state.value.runId == run.runId) pair.pause()
+    }
+    LaunchedEffect(firstState, secondState) {
+        if (!bothConnected) pair.interrupt("Both devices must stay connected.")
+    }
+    val firstHasTimedHighG = firstData.highG.lastOrNull()?.acquisitionTimeNs != null
+    val secondHasTimedHighG = secondData.highG.lastOrNull()?.acquisitionTimeNs != null
+    LaunchedEffect(bothConnected, firstHasTimedHighG, secondHasTimedHighG, autoStartPending) {
+        if (autoStartPending && bothConnected && firstHasTimedHighG && secondHasTimedHighG &&
+            pair.state.value.phase == PairPhase.IDLE) startRun(forceFreshSegment = false)
+    }
+    LaunchedEffect(run.phase, run.runId) {
+        if (pair.state.value.runId != run.runId || pair.state.value.phase != run.phase) return@LaunchedEffect
+        if (run.phase == PairPhase.COMPLETE || run.phase == PairPhase.INTERRUPTED) {
+            first.cancelPendingCaptureTrigger()
+            second.cancelPendingCaptureTrigger()
+            first.setCapturePaused(true)
+            second.setCapturePaused(true)
+            cursorEnabled = false
+            if (run.phase == PairPhase.COMPLETE) setTimeWindow(0.010f)
+            if (run.phase == PairPhase.INTERRUPTED) showPrevious = false
+        }
     }
 
     Scaffold(topBar = {
@@ -196,45 +224,72 @@ fun NewtonsThirdLawScreen(
                             Text("Two strikers · signed planar acceleration (g)", style = MaterialTheme.typography.titleSmall)
                             Text(mode.instructions, style = MaterialTheme.typography.bodySmall)
                             Text("Match the sensor X/Y directions on both strikers. The graph sign follows the selected collision axis.", style = MaterialTheme.typography.bodySmall)
+                            if (run.completed != null && run.phase != PairPhase.COMPLETE) {
+                                TextButton(onClick = { showPrevious = !showPrevious; cursorEnabled = false }) {
+                                    Text(if (showPrevious) "Show live data" else "View previous completed capture")
+                                }
+                            }
                         }
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("1: ${firstName ?: firstState.name}  ·  2: ${secondName ?: secondState.name}",
+                    Text("1: ${frozen?.firstName ?: firstName ?: firstState.name}  ·  2: ${frozen?.secondName ?: secondName ?: secondState.name}",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (bothConnected) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f))
                     TextButton(onClick = {
-                        if (timeWindowSec < 1f) {
-                            setTimeWindow(3f)
-                        }
-                        if (firstPaused) first.togglePause()
-                        if (secondPaused) second.togglePause()
-                    }, enabled = bothConnected && (firstPaused || secondPaused), contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Resume") }
+                        if (running) {
+                            pair.pause()
+                            first.cancelPendingCaptureTrigger()
+                            second.cancelPendingCaptureTrigger()
+                            first.setCapturePaused(true)
+                            second.setCapturePaused(true)
+                        } else startRun()
+                    }, enabled = bothConnected || running, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        Text(if (running) "Pause" else "Resume")
+                    }
                     TextButton(onClick = {
+                        val wasRunning = running
+                        autoStartPending = false
+                        stopRun("Live history cleared.")
+                        pair.clearLive()
+                        showPrevious = false
                         first.clearLogs()
                         second.clearLogs()
+                        cursorEnabled = false
+                        if (wasRunning) startRun()
                     }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("Clear") }
+                }
+                if (run.phase == PairPhase.INTERRUPTED) {
+                    Text(run.message.replace("Start a new run.", "Tap Resume to continue."),
+                        Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+                if (run.phase != PairPhase.INTERRUPTED) {
+                    firstConnectionError?.let { Text("Device 1: $it", Modifier.padding(horizontal = 8.dp),
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+                    secondConnectionError?.let { Text("Device 2: $it", Modifier.padding(horizontal = 8.dp),
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Collision direction", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
                     FilterChip(collisionAlongX, onClick = { setAxis(true) }, label = { Text("X") })
                     FilterChip(!collisionAlongX, onClick = { setAxis(false) }, label = { Text("Y") })
-                    if (firstPaused && secondPaused) {
+                    if (frozen != null) {
                         Spacer(Modifier.weight(1f))
                         Text("Cursor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
                         Switch(checked = cursorEnabled, onCheckedChange = { cursorEnabled = it })
                     }
                 }
                 CollisionChart(
-                    firstPoints = if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
-                    secondPoints = if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
+                    firstPoints = frozen?.first?.points ?: if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
+                    secondPoints = frozen?.second?.points ?: if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
                     firstZero = firstZero,
                     secondZero = secondZero,
-                    collisionAlongX = collisionAlongX,
+                    collisionAlongX = frozen?.alongX ?: collisionAlongX,
                     timeWindowMs = windowMs,
-                    impactAnchors = if (firstPaused && secondPaused) capturedPeakTimes else null,
+                    impactAnchors = capturedPeakTimes,
                     cursorEnabled = cursorEnabled,
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
@@ -246,7 +301,10 @@ fun NewtonsThirdLawScreen(
                             val index = timeWindowOptions.indices.minByOrNull { abs(timeWindowOptions[it].seconds - timeWindowSec) } ?: 0
                             Slider(
                                 value = index.toFloat(),
-                                onValueChange = { setTimeWindow(timeWindowOptions[it.roundToLong().toInt().coerceIn(0, timeWindowOptions.lastIndex)].seconds) },
+                                onValueChange = {
+                                    if (running) stopRun("Capture duration changed.")
+                                    setTimeWindow(timeWindowOptions[it.roundToLong().toInt().coerceIn(0, timeWindowOptions.lastIndex)].seconds)
+                                },
                                 valueRange = 0f..timeWindowOptions.lastIndex.toFloat(),
                                 steps = timeWindowOptions.size - 2,
                                 modifier = Modifier.height(30.dp)
@@ -255,11 +313,17 @@ fun NewtonsThirdLawScreen(
                     }
                     NewtonCollapsibleCard("Sensor Calibration (High-G Zero)", if (zeroed) "Both sensors zeroed" else "Tap to zero both sensors",
                         calibrationExpanded, { calibrationExpanded = !calibrationExpanded }) {
-                            Text("Keep both strikers still, then zero both X/Y baselines.", style = MaterialTheme.typography.bodySmall)
+                            Text("Keep both strikers still to refresh both X/Y baselines.", style = MaterialTheme.typography.bodySmall)
                             TextButton(onClick = {
-                                firstZero = zeroFrom(firstData.highG)
-                                secondZero = zeroFrom(secondData.highG)
-                                zeroed = true
+                                fun zero(points: List<AxisPoint>): PlanarZero {
+                                    val recent = points.takeLast(100)
+                                    return PlanarZero(recent.map { it.x }.average().toFloat(),
+                                        recent.map { it.y }.average().toFloat())
+                                }
+                                firstManualZero = zero(firstData.highG)
+                                secondManualZero = zero(secondData.highG)
+                                hasManualZero = true
+                                startRun()
                             }, enabled = bothConnected && firstData.highG.isNotEmpty() && secondData.highG.isNotEmpty()) {
                                 Text("Zero both sensors")
                             }
@@ -276,11 +340,12 @@ fun NewtonsThirdLawScreen(
                                 second.setHighGRange(it)
                             }
                     }
-                    NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · ${triggerDelayMs} ms" else "Disabled",
+                    NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · $postImpactMs ms post-impact" else "Disabled",
                         triggerExpanded, { triggerExpanded = !triggerExpanded }) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                                 Text("Enable Auto-Trigger", style = MaterialTheme.typography.bodySmall)
                                 Switch(checked = triggerEnabled, onCheckedChange = {
+                                    stopRun("Trigger setting changed.")
                                     first.setAutoTriggerEnabled(it)
                                     second.setAutoTriggerEnabled(it)
                                 })
@@ -289,6 +354,7 @@ fun NewtonsThirdLawScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 listOf("Above", "Below", "Deviation").forEach { condition ->
                                     FilterChip(triggerCondition == condition, onClick = {
+                                        stopRun("Trigger condition changed.")
                                         first.setAutoTriggerCondition(condition)
                                         second.setAutoTriggerCondition(condition)
                                     }, label = { Text(condition) })
@@ -299,15 +365,18 @@ fun NewtonsThirdLawScreen(
                                 onValueChange = { entered ->
                                     thresholdText = entered
                                     entered.toFloatOrNull()?.takeIf { it >= 0f }?.let {
+                                        if (running) stopRun("Trigger threshold changed.")
                                         first.setAutoTriggerThreshold(it)
                                         second.setAutoTriggerThreshold(it)
                                     }
                                 },
-                                label = { Text("Threshold (g)") },
+                                label = { Text("Threshold magnitude (g)") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
-                            Text("Post-trigger delay: $triggerDelayMs ms (½ time window)", style = MaterialTheme.typography.bodySmall)
+                            Text(if (frozen != null) "Captured post-impact interval: $postImpactMs ms. Plot zoom preserves saved samples."
+                                else "Post-impact interval: $postImpactMs ms (half the capture window).", style = MaterialTheme.typography.bodySmall)
+                            Text("Above: +threshold · Below: −threshold · Deviation: either direction.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
