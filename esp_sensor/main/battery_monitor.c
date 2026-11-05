@@ -4,8 +4,17 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
+#include "esp_idf_version.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+/* IDF renamed the highest attenuation setting; use the same setting for
+ * channel setup and voltage calibration on either SDK. */
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 2, 0)
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_11
+#else
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
+#endif
 
 static adc_oneshot_unit_handle_t adc;
 static adc_cali_handle_t calibration;
@@ -67,11 +76,11 @@ void battery_monitor_start(gpio_num_t power_hold_pin)
     hold_pin = power_hold_pin;
     const adc_oneshot_unit_init_cfg_t unit = { .unit_id = ADC_UNIT_1 };
     const adc_oneshot_chan_cfg_t channel = {
-        .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = BATTERY_ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
     const adc_cali_curve_fitting_config_t cal = {
         .unit_id = ADC_UNIT_1, .chan = ADC_CHANNEL_3,
-        .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = BATTERY_ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
     esp_err_t err = adc_oneshot_new_unit(&unit, &adc);
     if (err == ESP_OK) err = adc_oneshot_config_channel(adc, ADC_CHANNEL_3, &channel);

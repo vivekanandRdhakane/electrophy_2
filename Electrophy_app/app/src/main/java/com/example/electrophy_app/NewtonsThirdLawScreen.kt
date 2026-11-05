@@ -67,6 +67,8 @@ fun NewtonsThirdLawScreen(
 ) {
     val firstState by first.connectionState.collectAsState()
     val secondState by second.connectionState.collectAsState()
+    val firstTiming by first.timingStatus.collectAsState()
+    val secondTiming by second.timingStatus.collectAsState()
     val firstName by first.connectedDeviceName.collectAsState()
     val secondName by second.connectedDeviceName.collectAsState()
     val firstReceiveRate by first.receivedSamplesPerSecond.collectAsState()
@@ -320,6 +322,7 @@ fun NewtonsThirdLawScreen(
                 }
             }
             Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
+                Text("1: $firstTiming\n2: $secondTiming", style = MaterialTheme.typography.labelSmall)
                 Text("Blue 1: ${if (firstState == ConnectionState.Connected && firstShownRate > 0) firstShownRate else "--"} samples/s   ·   Orange 2: ${if (secondState == ConnectionState.Connected && secondShownRate > 0) secondShownRate else "--"} samples/s${if (firstPaused && secondPaused) " (before pause)" else ""}",
                     style = MaterialTheme.typography.labelSmall)
                 Text(

@@ -61,7 +61,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 
 **Gemini key:** **Flash** and **Pro** mean the corresponding entries in the Gemini model picker, not the Google subscription name. The Gemini alternative is a substitute, not an instruction to run both providers. Google documents Low/Medium/High thinking controls; select them where exposed by your client. If your interface only offers a Pro/Thinking preset, use the corresponding available reasoning model rather than trying to set an unsupported API parameter. [Official Gemini model and thinking controls](https://support.google.com/gemini/answer/18648722?hl=en).
 
-**Completion:** Use ✅ only when the task is fully implemented and its acceptance criteria are satisfied; otherwise leave the cell blank. Keep the task status and completion log in sync. All 41 tasks are currently incomplete.
+**Completion:** Use ✅ only when the task is fully implemented and its acceptance criteria are satisfied; otherwise leave the cell blank. Keep the task status and completion log in sync. Reconciled against source on **5 November 2026**, commit `2d5599d`: E001, E002, and E005 retain their recorded completion; E011 is partial (its earlier completion record overstates production integration). Several other tasks have partial implementations described below. Original evidence and numerical observations describe the October baseline unless explicitly updated.
 
 | ID | Completed | Priority | Category | Task | Complexity | Recommended Codex model / effort | Gemini alternative / thinking |
 |---|:---:|---|---|---|---|---|---|
@@ -75,7 +75,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E008 |  | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
 | E009 |  | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
 | E010 |  | P1 | Android | Reliable BLE lifecycle and operation completion | High | Sol / High | Pro / High |
-| E011 | ✅ | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
+| E011 |  | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
 | E012 |  | P1 | Math | Use actual time and align signals | High | Sol / High | Pro / High |
 | E013 |  | P1 | Physics | Correct force, impulse, and SI quantities | High | Sol / High | Pro / High |
 | E014 |  | P1 | Physics | Repair vehicle velocity-change experiment | Medium | Sol / Medium | Pro / Medium |
@@ -191,7 +191,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E003 — Acquisition timestamps and explicit gaps
 
-**Status:** [ ] TODO. **Scope:** app + firmware protocol. **Dependencies:** coordinate E002/E004/E007; required by quantitative analysis.
+**Status:** [ ] Partial — v2 single-sensor FIFO timeline, counters, segments, gap handling, and overhead diagnostics implemented 5 November 2026. Hardware timing/rate qualification and combined-mode acquisition timing remain open; see the E003 log and `esp_sensor/TIMING_PROTOCOL.md`. **Scope:** app + firmware protocol. **Dependencies:** coordinate E002/E004/E007; required by quantitative analysis.
 
 **Evidence:** FW:127–137 has no acquisition timestamps or sample counters. MAIN:949–953 spreads samples between phone wall-clock notification times and invents +20 ms when callbacks coalesce. MAIN:908 reads but ignores sequence. MAIN:1145–1155 independently uses receipt timing for attitude. Reconnect resets the time origin without clearing chart data; resume spreads a batch across the pause.
 
@@ -275,7 +275,7 @@ Report exact loss counts where observable and explicitly unknown counts for sens
 
 ### E011 — Separate captures, analysis intervals, and chart history
 
-**Status:** [x] Complete. **Scope:** data/capture model + shared chart selection. **Dependencies:** E003/E004; coordinate E019/E021.
+**Status:** [ ] Partial — chart history/decimation and capture model implemented; production capture ownership and quality feedback remain incomplete (5 November 2026 review). **Scope:** data/capture model + shared chart selection. **Dependencies:** E003/E004; coordinate E019/E021.
 
 **Evidence:** MAIN:102/1129–1133 retains 1500 points. This is about 0.195 s at 7680 Hz, 0.391 s at 3840 Hz, 3.125 s at 480 Hz, and 12.5 s at 120 Hz. Several presets request much longer windows. EXP:399–405 analyzes the entire retained list while its chart independently selects a viewport. EXP:1605/1643 re-estimates baseline from whichever first ten samples remain. Results change when old data is evicted. Promised impulse shading is absent.
 
@@ -638,6 +638,42 @@ These are audit checks, not substitutes for permanent regression tests or hardwa
 
 Physical tests still needed after code fixes include sensor axis/mount verification, noise and bias across ranges, calibration repeatability, FIFO timestamp behavior, achievable unique acquisition rates, radio/phone-dependent throughput, packet loss, clipping, sensor bandwidth/aliasing, and comparison against a characterized motion/vibration reference. The present audit cannot certify absolute measurement accuracy from source code.
 
+## Source reconciliation — 5 November 2026
+
+Reviewed current app/firmware source and repository history through `2d5599d`. Compared later changes with the task contracts, including changes after `47f405d` (the recorded E011 implementation). This is a source review: existing test source was inspected, but tests, Android/firmware builds, UI sessions, and hardware measurements were **not rerun**. Earlier log test results remain historical claims, not new verification. No additional whole task meets enough of its acceptance contract to add a completion tick in this review.
+
+### Implemented improvements missing from the task statuses
+
+Paths below are relative to `electrophy_2/`; app filenames refer to `Electrophy_app/app/src/main/java/com/example/electrophy_app/`.
+
+| Task | Already implemented in current source | Still required for full completion |
+|---|---|---|
+| E003 | `MainActivity.kt::processBinaryPacket` uses monotonic elapsed time and replaces the old artificial 20 ms packet increment with a 0.001 ms ordering floor. `ReceiveRateMeter` consumes packet sequences. | Sample times are still interpolated from BLE arrival times, not acquisition times. The AA55 header has no acquisition timestamp/session/sample identity; sequence gaps do not become analysis quality flags. |
+| E004 | `esp_sensor/main/main.c::imu_fifo_sync/imu_fifo_drain` uses tagged hardware FIFO entries for LOW_ACC, HIGH_ACC, and ONLY_GYRO; handles read failures and logs FIFO overrun observations. Commit `a84e795`. | BOTH_ACC/ALL retain direct-register tuples without per-sensor freshness/synchronization. FIFO timestamp batching is explicitly disabled. Validate unique cadence/loss on hardware; an overrun observation is not an exact lost-sample count. |
+| E007 | A recursive SPI mutex covers complete configuration/read operations; stream-generation changes invalidate old batches and queued packets. Commit `d0dde0d`. | Driver configuration failures still do not gate updates to `g_*` settings; app setters immediately update displayed settings without applied-state acknowledgement. The 1.875 Hz command still requests an unchanged operating mode. Register/cadence verification and configuration provenance remain missing. |
+| E008 | `platform_write` returns SPI errors; `platform_read` rejects reads over 32 bytes and copies receive data only on success. Normal BLE direct acquisition rejects a tuple when any driver read fails; FIFO reads count errors. Wrong WHO_AM_I stops the sensor task; commands check `sensor_ready`. | Initialization and configuration still ignore many driver return values, and the console-only acquisition branch ignores read failures. Add transaction-stage fault injection and deterministic readiness/recovery verification. This substantially fixes the original SPI defects but does not complete the task. |
+| E009 | Replaced the NOTIFY_TX in-flight counter with a bounded 16-packet retry queue, handling ENOMEM/EAGAIN/EBUSY and permanent errors. Added acquired/submitted/pending/overflow/discarded counters, decoded receive rates/sequence gaps, and explicit submission-versus-delivery wording. `imu_transport.h`, `StreamDiagnostics.kt`, `StreamDiagnosticsPanel.kt`, `STREAM_DIAGNOSTICS.md`; queue/packing and diagnostics test sources exist. Commit `d0dde0d`. | No end-to-end sample identities or analysis-visible gaps; exact sensor losses remain unknown. Queue tests do not establish real allocation/disconnect/slow-receiver behavior. Complete reconciliation and the required throughput/failure qualification. |
+| E010 | Serialized GATT writes, timeout/retry handling, `onCleared` cleanup, and an address check on connection callbacks exist. | Connected is still set before successful CCCD completion and without requiring RX/TX/CCCD; write callbacks advance regardless of status. Timeouts advance the queue without proving completion. Address checks do not distinguish successive GATT sessions for the same device. Scan errors, connection deadlines, and full operation ownership remain incomplete. |
+| E028 | The catalog now describes two strikers' **accelerations**, removes this preset's force/impulse flags, and routes to `NewtonsThirdLawScreen.kt` with two BLE owners. Shared axis selection, baseline zeroing, dual threshold coincidence, receive-gap display, and impact-peak alignment exist. Commits `e532e8a`, `2d5599d`. | The original single-device evidence is historical. The replacement is an acceleration comparison: there are no mass inputs, synchronized acquisition clocks/captures, or paired-force calculation. Aligning each impact peak to zero does not establish simultaneity. Add the unequal-mass explanation and explicitly qualify what this lesson can demonstrate; do not treat dual BLE as validation of equal-and-opposite force. |
+| E033 | Peak-preserving chart decimation and bounded buffers remain implemented; terminal output is throttled. | Math still runs in Compose paths without the proposed shared background analysis/cache. Representative-phone frame time, backlog, memory, and full-rate numerical equivalence are not established. |
+| E036 | Unique device names, discovered-device selection, two device slots, delivered receive rates, RSSI/PHY/MTU/interval/queue diagnostics, and battery display exist. Commit `d02e6c7` plus diagnostics changes. | Calibration still uses shared `sensor_calibration` preferences rather than device identity. Experiment instructions still direct connection through Raw Data. Off/stale-channel analysis gating, applied configuration, and complete recovery flows remain open. |
+| E039 | More permanent regression sources exist: conversion, decoder, median, capture/decimation/range limits, stream diagnostics, battery, and native C transport/packing. Hardware measurement instructions exist in `esp_sensor/STREAM_DIAGNOSTICS.md`. | A documented reproducible build/lint result and the broader scientific fixtures/hardware qualification required by E039 are not established by this review. A checklist is not a measured result. |
+
+### Correction to the existing E011 completion claim
+
+The earlier log correctly records useful components, but **E011 is partial**, so its tick has been removed. `MeasurementCapture` and `DurationBoundedBuffer.captureInterval` are referenced only inside `CaptureModels.kt` in production source; experiment screens do not consume saved captures. `ExperimentScreen.kt` still computes metrics from the visible chart window, and callers of `calculateImpulse` / `estimateVelocityChange` omit `fixedBaseline`. Thus the baseline/result can change with the window. Quality enums exist, but clipping/gap quality is not wired through capture creation and result display. Full selected-interval shading/results and saved-capture ownership remain to be integrated.
+
+The 50,000-point cap also limits retained history to about **6.51 seconds at 7680 samples/s**, so the duration buffer cannot guarantee a 30-second viewport at every supported rate. Existing 35-second retention tests cover up to 1000 Hz. Drawn range-limit lines added in `3d8eb0b` are useful, but they do not detect and propagate a capture's clipping validity (E011/E032).
+
+### Remaining unchanged defects and historical-record caveat
+
+- E006 still initializes `bestCorr = -2f` and compares absolute magnitudes; the documented comparator failure remains.
+- E012/E013/E014 remain open: integration still uses nominal ODR, force/impulse labels still operate on acceleration without mass, and vehicle results still use the high-G-first rate selection and `units/s` label.
+- E018 still plots sensor data under attitude labels and keeps a local `yawOffset`; E019 still mixes trigger sources in combined modes and posts an uncancelled delayed pause on a new Handler.
+- E021 still writes formatted text synchronously on receipt, without reproducible sample timestamps/configuration. E022 still omits the Nyquist bin; E025 still uses the approximate analog cutoff formula. E035 still uses `remember` screen state without system Back handling/restoration. These are not resolved by newer connection or chart features.
+- E002's old log says text accumulation is bounded to 4096 characters. Current `appendLog` has no such bound: a stream with no newline can grow `pendingData` indefinitely. The strict binary decoder/MTU implementation remains, but restore that recorded hardening or track it as a regression; this review does not silently reaffirm every statement in the old completion log.
+- Battery/power management and assembly-test modes are additional work outside the original 41 task contracts. Their presence does not imply scientific validation tasks are complete.
+
 ## Completion log template
 
 For each implemented task append:
@@ -654,6 +690,139 @@ Remaining limitations and follow-up task IDs:
 ```
 
 ### Log entries
+
+```text
+Task: E003 verification cleanup
+Date: 2026-11-05
+Status: v2 selected for normal use; temporary comparison code removed
+User-provided measurements:
+- Single-device Android OFF/ON/OFF run: approximately 7668 / 7670 / 7667
+  received samples/s over 42.2 / 82.5 / 42.2 seconds.
+- v2 stayed in segment 43 with zero detected missing samples/rejected frames;
+  approximately 37.18 kB/s versus 35.16-35.17 kB/s legacy (about 5.7% overhead).
+- Earlier firmware excerpts included a separate overflow/retry episode. These
+  observations do not establish zero loss under all conditions or timing accuracy.
+Changed files/behavior:
+- MainActivity.kt always negotiates proto2. Removed the comparison switch/state,
+  E003 Logcat summaries, and per-packet comparison bookkeeping.
+- Firmware main.c removes proto1 switching and TIMING overhead summaries/state.
+  Keep proto2 negotiation and legacy compatibility for old apps/firmware and
+  combined modes. Preserve actual timing identities, gap detection, and validity.
+- Preserve regression tests and pre-existing opt-in STREAM/FIFO/PERF diagnostics.
+- Removed the isolated temporary e003-fw-compat build project from workspace build/.
+- Updated TIMING_PROTOCOL.md and STREAM_DIAGNOSTICS.md; old comparison instructions
+  and log descriptions in earlier completion entries below are historical.
+Verification:
+- ESP-IDF 6.1.0 build passed; app image 0xa5580 bytes (35% partition free).
+- Android testDebugUnitTest (55 tests, zero failures/errors) and assembleDebug passed.
+Limitations:
+- E003 stays partial: clock accuracy/drift and combined-mode timing remain open.
+  Hardware measurements above are user-provided; no new device run or flash here.
+```
+
+```text
+Task: E003 / E039 ESP-IDF 6.1 follow-up
+Date: 2026-11-05
+Status: ESP-IDF 6.1.0 production build verified; hardware qualification pending
+Changed files:
+- esp_sensor/main/main.c, .vscode/settings.json, .gitignore
+- esp_sensor/README.md, TIMING_PROTOCOL.md
+Findings and fixes:
+- Existing build cache still referenced IDF 5.1 compiler/Python paths. Set the
+  laptop's VS Code build path to build-idf61; retain old build artifacts separately.
+- Fresh 6.1 compilation exposed a linker error for ble_gattc_exchange_mtu:
+  peripheral-only 6.1 configuration disables GATT-client support. Guard that optional
+  call with MYNEWT_VAL(BLE_GATTC); Android still initiates MTU negotiation and the
+  server responds, with negotiated limits tracked by the existing MTU event.
+Verification:
+- idf.py -B build-idf61 build passed on the installed ESP-IDF 6.1.0/GCC 15.2 toolchain.
+- App and custom power-hold bootloader linked. App image 0xa5960 bytes, 35% free;
+  bootloader image 0x53a0 bytes, 35% free.
+- No Android changes/tests required for this firmware/configuration-only fix.
+- No flash or hardware/throughput verification. Compare timing overhead using the
+  same SDK version on both legacy and v2 runs.
+```
+
+```text
+Task: E003 / E039 build follow-up
+Date: 2026-11-05
+Status: Firmware build blocker resolved; hardware qualification still pending
+Changed files:
+- esp_sensor/main/CMakeLists.txt, main/battery_monitor.c, main/main.c
+- esp_sensor/README.md, TIMING_PROTOCOL.md, tests/test_imu_transport.c
+- Android timing decoder/routing/fixtures and timing protocol documentation
+Behavior changed:
+- IDF 5.1 uses the combined driver component; newer SDKs retain split drivers.
+- Battery channel/calibration share the SDK-appropriate attenuation name.
+- Compile optional NimBLE data-length-change diagnostics only when supported;
+  unavailable TX data length remains unknown, not a claimed measurement.
+- Corrected my timing packet identifier collision with battery telemetry:
+  timing v2 is AA58, battery remains AA57, diagnostics remain AA56.
+- Added regression assertions that timing frames cannot route as battery/diagnostics.
+Verification:
+- Production idf.py build passed on installed ESP-IDF 5.1.2, ESP32-C3, BLE enabled.
+- build/esp_sensor.bin generated: 0x8f650 bytes, 44% app partition free.
+- Corrected Android testDebugUnitTest and assembleDebug passed (55 tests);
+  timing-frame routing assertions now prevent the battery identifier collision.
+- No flash/hardware accuracy claim. Previous SDK-blocked notes below are historical.
+- Install the corrected Android APK with this firmware for AA58 timing support.
+```
+
+```text
+Task: E003
+Date: 2026-11-05
+Status: Interim implementation / hardware qualification pending; no completion tick
+Changed files:
+- esp_sensor/main/main.c and imu_transport.h; tests/test_imu_transport.c
+- esp_sensor/TIMING_PROTOCOL.md and STREAM_DIAGNOSTICS.md
+- Electrophy_app: AcquisitionTimeline.kt, PacketDecoder.kt, DataModels.kt,
+  MainActivity.kt, ExperimentScreen.kt, NewtonsThirdLawScreen.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/AcquisitionTimelineTest.kt
+Behavior changed:
+- Negotiated AA58/v2 single-sensor FIFO packets carry boot/segment identity,
+  acquired-sample index, first sample device time, period, and timing validity.
+- FIFO clock is reconstructed from one monotonic ESP/FIFO-level anchor per segment
+  and selected/factory-corrected ODR. Timing uncertainty and oscillator drift are
+  explicit: this is not a verified sensor-timestamp implementation.
+- Local MTU/queue drops preserve acquisition indices. FIFO faults establish a new
+  segment with unknown-loss metadata. Android rejects duplicate/reordered or
+  inconsistent timing and does not stretch later samples across missing intervals.
+- AxisPoint retains Long nanoseconds and identity through calibration/filtering;
+  chart Float time is relative only. Live history restarts at discontinuities,
+  with visible counters, until saved interval ownership is integrated under E011.
+- v2 gyro integration uses sample time; legacy timing is visibly estimated.
+  Old apps retain v1; old firmware/combined modes remain visibly legacy.
+- Reset/segment/disconnect invalidates pending trigger callbacks; incoming data
+  from an old GATT object is ignored. E010/E019 still have their broader open scope.
+- Added two-second TIMING firmware and E003 Logcat summaries plus a v1/v2 comparison
+  switch under Stream diagnostics. No per-sample serial logging or hardware flash.
+Regression tests and actual results:
+- Android testDebugUnitTest (55 tests, zero failures/errors) and assembleDebug passed with installed Android Studio
+  JBR; timing tests cover RAW16/packed12, exact header length, malformed packets,
+  sample counter wrap, long uptime, missing intervals, duplicate/reorder rejection,
+  boot/segment/reset boundaries, unknown upstream loss, and delivery/batch invariance.
+- Firmware transport test source cross-compiled with -std=c11 -Wall -Wextra -Werror;
+  shared wire size/offset static assertions passed. Cross-compilation does not
+  execute native runtime assertions.
+Android/firmware build result:
+- Debug APK built. lintDebug cannot complete: installed Java 25 triggers the old
+  lint Kotlin runtime's Java-version parsing failure (25.0.3). No lint pass claimed.
+- Production firmware build cannot configure with the only installed ESP-IDF 5.1.2:
+  missing esp_driver_spi (project requires 5.3.1). No production firmware pass claimed.
+- An isolated 5.1.2 compatibility project also compiled the production C sources:
+  compiler errors were the existing ADC_ATTEN_DB_12 and BLE data-length event APIs
+  absent from that SDK. No new timing-code diagnostics were reported, but this is
+  not a linked firmware build or a substitute for a 5.3.1 build.
+Hardware/UI verification:
+- Not performed; no device flashed. Follow TIMING_PROTOCOL.md for paired legacy/v2
+  3840/7680 Hz runs, capture TIMING/PERF/FIFO/STREAM and phone E003 lines.
+Remaining limitations:
+- E004 combined-mode freshness/synchronization; E007 applied configuration;
+  E011 immutable captures; E012 downstream timestamp-based math; E017 full attitude.
+- Measure acquisition timing uncertainty/drift and actual throughput before calling
+  E003 fully qualified. Firmware v2 header is 36 bytes versus v1's 9, so include
+  packet/header bandwidth in the comparison rather than assuming negligible overhead.
+```
 
 ```text
 Task: E001
@@ -761,6 +930,7 @@ Remaining limitations and follow-up task IDs:
 ```
 Task: E011
 Date: 2026-10-11
+Status: Partial (corrected by source reconciliation on 2026-11-05; original completion claim superseded)
 Files modified/created:
 - Electrophy_app/app/src/main/java/com/example/electrophy_app/CaptureModels.kt
 - Electrophy_app/app/src/main/java/com/example/electrophy_app/ChartDecimator.kt

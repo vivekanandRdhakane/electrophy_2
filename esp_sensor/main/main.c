@@ -74,6 +74,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_cpu.h"
+#include "esp_random.h"
 #include "esp_task_wdt.h"
 #if USE_BLE
 #include "nvs_flash.h"
@@ -180,17 +181,13 @@ static volatile bool          g_data_paused       = false;
 #define BINARY_FMT_16BIT 0   /* legacy: raw 16-bit per axis */
 #define BINARY_FMT_12BIT 1   /* 12-bit packed (4 LSBs dropped) — 25% smaller */
 
-typedef struct __attribute__((packed)) {
-    uint8_t magic0;        /* 0xAA */
-    uint8_t magic1;        /* 0x55 */
-    uint8_t mode;          /* stream_mode_t (0: ALL, 1: LOW_ACC, 2: HIGH_ACC, 3: BOTH_ACC, 4: ONLY_GYRO) */
-    uint8_t sample_count;  /* Number of samples in this packet */
-    uint8_t xl_fs;         /* lsm6dsv320x_xl_full_scale_t (0: 2g, 1: 4g, 2: 8g, 3: 16g) */
-    uint8_t hg_fs;         /* lsm6dsv320x_hg_xl_full_scale_t (0: 32g, 1: 64g, 2: 128g, 3: 256g, 4: 320g) */
-    uint8_t gy_fs;         /* lsm6dsv320x_gy_full_scale_t (1: 250, 2: 500, 3: 1000, 4: 2000, 5: 4000) */
-    uint8_t seq;           /* rolling packet sequence number 0..255 */
-    uint8_t fmt;           /* payload format (BINARY_FMT_*) */
-} imu_binary_header_t;
+/* AA58 v2: single-sensor FIFO timing, independent of BLE delivery. */
+static volatile bool s_timed_protocol;
+static uint32_t s_boot_id, s_timing_segment, s_sample_index, s_period_ns;
+static uint64_t s_next_sample_ns;
+static bool s_clock_anchored;
+static bool s_unknown_loss_pending;
+static uint8_t s_timing_flags = 1; /* FIFO rate-reconstructed estimate. */
 
 /* Local FIFO / batch accumulation buffer */
 #define BLE_ATT_MTU_DEFAULT 23
@@ -239,6 +236,9 @@ static imu_perf_t s_perf, s_perf_snapshot;
 static volatile uint32_t s_irq_count;
 /* Sensor-task-owned FIFO state; combined modes retain direct-register tuples. */
 static bool s_fifo_active, s_fifo_backlog;
+static uint16_t imu_header_bytes(void) {
+    return s_timed_protocol && s_fifo_active ? sizeof(imu_timed_header_t) : sizeof(imu_binary_header_t);
+}
 static uint32_t s_fifo_generation = UINT32_MAX;
 static uint32_t s_fifo_overruns, s_fifo_flushed, s_fifo_unexpected;
 static uint16_t s_fifo_level, s_fifo_peak;
@@ -632,7 +632,9 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
         s_stream_generation++;
 
-        if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
+        if (strcasecmp(cmd, "proto2") == 0) {
+            s_timed_protocol = true;
+        } else if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
             g_data_paused = true;
             status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Data reading and sending PAUSED");
@@ -967,7 +969,7 @@ static void imu_drain_tx(void)
 static void imu_flush_batch(void)
 {
     if (s_batch_sample_count == 0) return;
-    uint16_t total_len = sizeof(imu_binary_header_t) + (s_batch_bitpos + 7) / 8;
+    uint16_t total_len = imu_header_bytes() + (s_batch_bitpos + 7) / 8;
     imu_binary_header_t *hdr = (imu_binary_header_t *)s_batch_buf;
     hdr->sample_count = s_batch_sample_count;
     if (!imu_tx_push(&s_tx_queue, s_batch_buf, total_len, s_batch_sample_count)) {
@@ -980,6 +982,11 @@ static void imu_flush_batch(void)
 
 static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, const int16_t *raw_gy)
 {
+    const uint16_t header_bytes = imu_header_bytes();
+    /* Advance identity BEFORE any MTU/queue rejection so loss remains observable. */
+    const uint32_t sample_index = s_sample_index++;
+    const uint64_t sample_ns = s_next_sample_ns;
+    s_next_sample_ns += s_period_ns;
     /* Axes packed per sample (3 per sensing path). */
     uint8_t axes;
     switch (current_stream_mode) {
@@ -989,12 +996,12 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
     }
 
     const uint16_t max_packet_bytes = imu_get_max_packet_bytes();
-    if (max_packet_bytes <= sizeof(imu_binary_header_t)) {
+    if (max_packet_bytes <= header_bytes) {
         s_stats.overflow++;
         return;
     }
 
-    const uint16_t payload_bytes    = max_packet_bytes - (uint16_t)sizeof(imu_binary_header_t);
+    const uint16_t payload_bytes    = max_packet_bytes - header_bytes;
     const uint16_t payload_bits     = payload_bytes * 8;
     const uint16_t bits_per_sample  = (uint16_t)axes * PACKED_BITS_PER_AXIS;
     const uint16_t max_samples      = payload_bits / bits_per_sample;
@@ -1007,8 +1014,7 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
 
     if (s_batch_sample_count == 0) {
         /* Start a fresh batch: clear payload bits and reset the bit cursor. */
-        memset(&s_batch_buf[sizeof(imu_binary_header_t)], 0,
-               sizeof(s_batch_buf) - sizeof(imu_binary_header_t));
+        memset(s_batch_buf, 0, sizeof(s_batch_buf));
         s_batch_bitpos = 0;
         imu_binary_header_t *hdr = (imu_binary_header_t *)s_batch_buf;
         *hdr = (imu_binary_header_t){
@@ -1016,9 +1022,21 @@ static void imu_accumulate_sample(const int16_t *raw_lg, const int16_t *raw_hg, 
             .mode = current_stream_mode, .xl_fs = g_xl_fs,
             .hg_fs = g_hg_fs, .gy_fs = g_gy_fs, .fmt = BINARY_FMT_12BIT,
         };
+        if (header_bytes == sizeof(imu_timed_header_t)) {
+            imu_timed_header_t *timed = (imu_timed_header_t *)s_batch_buf;
+            timed->base.magic1 = 0x58;
+            timed->version = 2;
+            timed->flags = s_timing_flags;
+            timed->header_bytes = header_bytes;
+            timed->boot_id = s_boot_id;
+            timed->segment_id = s_timing_segment;
+            timed->first_sample = sample_index;
+            timed->first_time_ns = sample_ns;
+            timed->period_ns = s_period_ns;
+        }
     }
 
-    uint8_t  *payload = &s_batch_buf[sizeof(imu_binary_header_t)];
+    uint8_t  *payload = &s_batch_buf[header_bytes];
     uint32_t  bitpos  = s_batch_bitpos;
 
     switch (current_stream_mode) {
@@ -1145,6 +1163,16 @@ static bool imu_fifo_sync(void)
     ulTaskNotifyTake(pdTRUE, 0);
     if (rc == 0) {
         s_fifo_generation = generation;
+        s_timing_segment++;
+        s_sample_index = 0;
+        s_clock_anchored = false;
+        s_timing_flags = 1 | (s_unknown_loss_pending ? 2 : 0);
+        s_unknown_loss_pending = false;
+        /* Factory correction applies to normal XL/GY ODR series. This
+         * is a rate estimate, not a measured clock calibration. */
+        double corrected_rate = rate * (s_freq_fine_valid && current_stream_mode != STREAM_MODE_HIGH_ACC
+                                       ? 1.0 + 0.0013 * s_freq_fine : 1.0);
+        s_period_ns = corrected_rate > 0 ? (uint32_t)llround(1e9 / corrected_rate) : 0;
         last_running = running;
         retry_after = 0;
         ESP_LOGI("FIFO", "mode=%d active=%u rate=%.2f watermark=%u flushed=%lu",
@@ -1180,7 +1208,21 @@ static void imu_fifo_drain(void)
     }
     s_fifo_level = (uint16_t)status[0] | (uint16_t)(status[1] & 1u) << 8;
     if (s_fifo_level > s_fifo_peak) s_fifo_peak = s_fifo_level;
-    if (status[1] & 0x48u) s_fifo_overruns++; /* Current or latched overrun; not a loss count. */
+    if (status[1] & 0x48u) {
+        s_fifo_overruns++; /* Exact missing count unknown. Never bridge this. */
+        s_fifo_generation = s_stream_generation - 1;
+        s_unknown_loss_pending = true;
+        xSemaphoreGiveRecursive(spi_mutex);
+        return; /* Flush and establish a new segment on the next sync. */
+    }
+    if (!s_clock_anchored && s_fifo_level && s_period_ns) {
+        /* Latest FIFO entry was acquired between zero and one sample period
+         * before this status read, plus SPI/scheduling uncertainty. Anchor only
+         * once per segment: draining/transport jitter never stretches samples. */
+        uint64_t now_ns = (uint64_t)esp_timer_get_time() * 1000;
+        s_next_sample_ns = imu_timing_anchor_ns(now_ns, s_fifo_level, s_period_ns);
+        s_clock_anchored = true;
+    }
     /* Bound mutex ownership; return to transport/watchdog between chunks. */
     uint16_t count = s_fifo_level > 32 ? 32 : s_fifo_level;
     s_fifo_backlog = s_fifo_level > count;
@@ -1193,13 +1235,19 @@ static void imu_fifo_drain(void)
             s_stats.read_errors++;
             /* Partial read can leave entry pointer uncertain: flush before reuse. */
             s_fifo_generation = s_stream_generation - 1;
+            s_unknown_loss_pending = true;
             s_fifo_backlog = false;
             break;
         }
         s_fifo_level--;
         uint8_t expected = current_stream_mode == STREAM_MODE_LOW_ACC ? LSM6DSV320X_XL_NC_TAG :
             current_stream_mode == STREAM_MODE_HIGH_ACC ? LSM6DSV320X_XL_HG_TAG : LSM6DSV320X_GY_NC_TAG;
-        if (entry.tag != expected) { s_fifo_unexpected++; continue; }
+        if (entry.tag != expected) {
+            s_fifo_unexpected++;
+            s_unknown_loss_pending = true;
+            s_fifo_generation = s_stream_generation - 1;
+            break; /* Unknown continuity: flush rather than invent timing. */
+        }
         if (s_fifo_generation != s_stream_generation) break;
         int16_t raw[3];
         for (unsigned a = 0; a < 3; a++) raw[a] = (int16_t)((uint16_t)entry.data[2*a] | (uint16_t)entry.data[2*a+1] << 8);
@@ -1218,6 +1266,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            s_timed_protocol = false; /* Old apps retain AA55 until negotiation. */
             s_stream_generation++;
             s_diagnostics_enabled = false;
             memset(s_diagnostics_snapshot, 0, sizeof(s_diagnostics_snapshot));
@@ -1228,9 +1277,13 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
             ble_conn_handle = event->connect.conn_handle;
             s_negotiated_mtu = BLE_ATT_MTU_DEFAULT;
             ESP_LOGI(TAG_BLE, "Connected  (conn_handle=%d)", ble_conn_handle);
-            /* Request a large MTU and the fastest practical LE link. The phone
-             * may reject any preference; streaming continues with negotiated values. */
+            /* IDF 6 can omit GATT-client procedures in peripheral-only builds.
+             * Android requests MTU itself; the GATT server still responds and
+             * BLE_GAP_EVENT_MTU records the negotiated payload limit. */
+#if MYNEWT_VAL(BLE_GATTC)
             ble_gattc_exchange_mtu(ble_conn_handle, NULL, NULL);
+#endif
+            /* Request the fastest practical link; preferences may be rejected. */
             struct ble_gap_upd_params params = {
                 .itvl_min = 6,              /* 7.5 ms */
                 .itvl_max = 12,             /* 15 ms */
@@ -1308,11 +1361,13 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                      s_link_tx_phy, s_link_rx_phy);
         }
         break;
+#ifdef BLE_GAP_EVENT_DATA_LEN_CHG
     case BLE_GAP_EVENT_DATA_LEN_CHG:
         s_link_tx_octets = event->data_len_chg.max_tx_octets;
         ESP_LOGI(TAG_BLE, "Link data length tx=%u rx=%u",
                  s_link_tx_octets, event->data_len_chg.max_rx_octets);
         break;
+#endif
 
     default:
         break;
@@ -1583,6 +1638,7 @@ static void ble_diagnostics_tick(struct ble_npl_event *event)
 
 static void ble_stack_init(void)
 {
+    s_boot_id = esp_random();
     /* Suppress verbose NimBLE procedure logs (e.g. notify procedure initiation on every packet) */
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
 

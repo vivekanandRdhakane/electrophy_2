@@ -10,7 +10,15 @@ enum class GraphMode(val label: String, val command: String) {
     ALL("All Sensors", "all"),
 }
 
-data class AxisPoint(val x: Float, val y: Float, val z: Float, val time: Float = 0f)
+data class AxisPoint(
+    val x: Float, val y: Float, val z: Float, val time: Float = 0f,
+    // Retained device time; Float time is only a segment-relative plot coordinate.
+    val acquisitionTimeNs: Long? = null,
+    val sampleIndex: Long? = null,
+    val timingSegment: Long? = null,
+    val acquisitionBootId: Long? = null,
+    val timingFlags: Int = 0
+)
 
 data class ChartData(
     val lowG: List<AxisPoint> = emptyList(),

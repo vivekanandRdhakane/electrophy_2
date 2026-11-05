@@ -3,6 +3,31 @@
 
 # _Sample project_
 
+## SDK compatibility
+
+Firmware builds have been verified on ESP-IDF 5.1.2 and 6.1.0. The newer 5.3
+driver component layout is retained, but 5.3.1 has not been rebuilt locally.
+On 5.1 it uses the combined `driver` component and the older `ADC_ATTEN_DB_11`
+name for the battery ADC attenuation. SDKs without the NimBLE data-length-change
+event report TX data length as unknown; this does not disable streaming.
+Peripheral-only SDK builds omit the optional client-initiated MTU request;
+Android requests MTU and the firmware's GATT server responds normally.
+Build using the SDK selected in the ESP-IDF extension (`idf.py build`).
+
+Use a separate build directory for each SDK. The laptop's VS Code folder setting
+uses `build-idf61` for its 6.1 installation; the equivalent terminal command is
+`idf.py -B build-idf61 build`. When using 5.3 on the PC, select that installation
+and use a separate directory such as `build-idf53`. Reusing a directory configured
+with another SDK retains the previous compiler/Python paths and can fail before
+source compilation. Generated `build` and `build-*` directories are ignored by Git.
+The 6.1 verification used `C:/esp/v6.1/esp-idf`, the matching EIM Python/toolchain,
+and `idf.py -B build-idf61 build`. Both app and power-hold bootloader linked;
+the app image after verification cleanup is 0xa5580 bytes (35% of its partition remains free). This is build
+verification only; BLE throughput and hardware timing must still be measured.
+
+Timing packets use **AA58**, diagnostics AA56, and battery telemetry AA57.
+Install the updated app together with the firmware for timing v2.
+
 ## Board power and status LED
 
 For debugging, set `USE_BLE` near the top of `main/main.c` to `0` and rebuild

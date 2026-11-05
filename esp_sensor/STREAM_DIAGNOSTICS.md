@@ -1,5 +1,10 @@
 # Measuring the acquisition and BLE path
 
+For acquisition timing v2, packet compatibility, uncertainty, and initial
+throughput results, see [TIMING_PROTOCOL.md](TIMING_PROTOCOL.md). The app always
+requests v2; temporary legacy/v2 comparison controls and overhead logs have been
+removed. Existing opt-in STREAM/FIFO/PERF diagnostics remain available.
+
 Flash the current firmware and install the updated Electrophy Android app.
 Connect, choose Low-G only, set 7680 Hz, and enable **Stream diagnostics**.
 Allow about six seconds for the first rate comparison, then observe at least

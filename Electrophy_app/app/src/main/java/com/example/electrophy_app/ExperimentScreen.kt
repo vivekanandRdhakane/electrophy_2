@@ -48,6 +48,7 @@ fun ExperimentScreen(
     onBack: () -> Unit,
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
+    val timingStatus by viewModel.timingStatus.collectAsState()
     val batteryStatus by viewModel.batteryStatus.collectAsState()
     val chartData by viewModel.chartData.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
@@ -436,6 +437,7 @@ fun ExperimentScreen(
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text("Real-Time Experiment Analysis", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                            Text(timingStatus, style = MaterialTheme.typography.labelSmall)
                             
                             if (mode.showPeakForce) {
                                 val peaks = findPeakValues(points)

@@ -210,6 +210,13 @@ class BleViewModel : ViewModel() {
     val lastSampleArrivalMs: StateFlow<Long?> = _lastSampleArrivalMs
     private var lastTerminalUpdateTimeMs = 0L
     private val receiveMeter = ReceiveRateMeter()
+    private val acquisitionTimeline = AcquisitionTimeline()
+    private val _timingStatus = MutableStateFlow("Waiting for timing information")
+    val timingStatus: StateFlow<String> = _timingStatus
+    private var timingGapSamples = 0L
+    private var timingRejected = 0L
+    private var timingDiscontinuities = 0L
+    private var lastTimingProtocol = 0
     private val firmwareRateTracker = FirmwareRateTracker()
     private var lastChartUpdateMs = 0L
     @Volatile private var lastDiagnosticsMs = 0L
@@ -232,6 +239,13 @@ class BleViewModel : ViewModel() {
     }
 
     private fun resetSession() {
+        acquisitionTimeline.reset()
+        invalidatePendingTrigger()
+        timingGapSamples = 0; timingRejected = 0; timingDiscontinuities = 0; lastTimingProtocol = 0
+        _timingStatus.value = "Waiting for timing information"
+        lowGBuffer.clear(); highGBuffer.clear(); gyroBuffer.clear()
+        _chartData.value = ChartData()
+        lastAttitudeCalcTimeMs = 0L
         sessionStartNanos = SystemClock.elapsedRealtimeNanos()
         lastAssignedTimeMs = 0.0
         lastSamplePacketArrivalMs = null
@@ -283,7 +297,7 @@ class BleViewModel : ViewModel() {
             val fx = if (!hasPrevLowG) { prevLowGX = pt.x; prevLowGY = pt.y; prevLowGZ = pt.z; hasPrevLowG = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevLowGX }.also { prevLowGX = it }
             val fy = (alpha * pt.y + (1f - alpha) * prevLowGY).also { prevLowGY = it }
             val fz = (alpha * pt.z + (1f - alpha) * prevLowGZ).also { prevLowGZ = it }
-            AxisPoint(fx, fy, fz, pt.time)
+            pt.copy(x = fx, y = fy, z = fz)
         }
     }
 
@@ -294,7 +308,7 @@ class BleViewModel : ViewModel() {
             val fx = if (!hasPrevHighG) { prevHighGX = pt.x; prevHighGY = pt.y; prevHighGZ = pt.z; hasPrevHighG = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevHighGX }.also { prevHighGX = it }
             val fy = (alpha * pt.y + (1f - alpha) * prevHighGY).also { prevHighGY = it }
             val fz = (alpha * pt.z + (1f - alpha) * prevHighGZ).also { prevHighGZ = it }
-            AxisPoint(fx, fy, fz, pt.time)
+            pt.copy(x = fx, y = fy, z = fz)
         }
     }
 
@@ -305,7 +319,7 @@ class BleViewModel : ViewModel() {
             val fx = if (!hasPrevGyro) { prevGyroX = pt.x; prevGyroY = pt.y; prevGyroZ = pt.z; hasPrevGyro = true; pt.x } else { alpha * pt.x + (1f - alpha) * prevGyroX }.also { prevGyroX = it }
             val fy = (alpha * pt.y + (1f - alpha) * prevGyroY).also { prevGyroY = it }
             val fz = (alpha * pt.z + (1f - alpha) * prevGyroZ).also { prevGyroZ = it }
-            AxisPoint(fx, fy, fz, pt.time)
+            pt.copy(x = fx, y = fy, z = fz)
         }
     }
 
@@ -368,6 +382,12 @@ class BleViewModel : ViewModel() {
     val autoTriggerDelayMs: StateFlow<Long> = _autoTriggerDelayMs
 
     private var isTriggerPending = false
+    private var triggerGeneration = 0L
+    private fun invalidatePendingTrigger() {
+        triggerGeneration++
+        isTriggerPending = false
+        isBaselineInitialized = false
+    }
     var onThresholdCrossed: (() -> Unit)? = null
     var onAutoTriggerPending: (() -> Unit)? = null
     var onAutoTriggerCapture: (() -> Unit)? = null
@@ -376,7 +396,9 @@ class BleViewModel : ViewModel() {
     fun schedulePause(delayMs: Long) {
         if (_connectionState.value != ConnectionState.Connected || _isPaused.value || isTriggerPending) return
         isTriggerPending = true
+        val generation = triggerGeneration
         Handler(Looper.getMainLooper()).postDelayed({
+            if (generation != triggerGeneration) return@postDelayed
             if (!_isPaused.value) {
                 togglePause()
                 Log.i(BLE_TAG, "Auto-trigger pause executed.")
@@ -388,8 +410,7 @@ class BleViewModel : ViewModel() {
 
     fun setAutoTriggerEnabled(enabled: Boolean) {
         _isAutoTriggerEnabled.value = enabled
-        isTriggerPending = false
-        isBaselineInitialized = false
+        invalidatePendingTrigger()
     }
 
     fun setAutoTriggerAxis(axis: String) {
@@ -459,7 +480,9 @@ class BleViewModel : ViewModel() {
             isTriggerPending = true
             Log.i(BLE_TAG, "Auto-trigger threshold crossed ($condition $threshold on $axis)! Pausing in $delay ms...")
             onAutoTriggerPending?.invoke()
+            val generation = triggerGeneration
             Handler(Looper.getMainLooper()).postDelayed({
+                if (generation != triggerGeneration) return@postDelayed
                 if (!_isPaused.value) {
                     togglePause()
                     Log.i(BLE_TAG, "Auto-trigger pause executed.")
@@ -585,6 +608,7 @@ class BleViewModel : ViewModel() {
     private var attitudeRoll = 0f
     private var attitudeYaw = 0f
     private var lastAttitudeCalcTimeMs = 0L
+    private var lastAttitudeSampleNs: Long? = null
 
     fun resetAttitudeYaw() {
         attitudeYaw = 0f
@@ -814,6 +838,7 @@ class BleViewModel : ViewModel() {
                 )
                 gatt.requestMtu(PREFERRED_BLE_MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                invalidatePendingTrigger()
                 _batteryStatus.value = null
                 _connectedDevice.value = null
                 _connectedDeviceName.value = null
@@ -916,6 +941,7 @@ class BleViewModel : ViewModel() {
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            if (gatt !== bluetoothGatt) return
             if (characteristic.uuid == TX_CHAR_UUID) {
                 handleIncomingData(value)
             }
@@ -923,6 +949,7 @@ class BleViewModel : ViewModel() {
 
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (gatt !== bluetoothGatt) return
             if (characteristic.uuid == TX_CHAR_UUID) {
                 val v = characteristic.value ?: return
                 handleIncomingData(v)
@@ -959,7 +986,8 @@ class BleViewModel : ViewModel() {
             }
             return
         }
-        if (value.size >= 9 && value[0] == 0xAA.toByte() && value[1] == 0x55.toByte()) {
+        if (value.size >= 2 && value[0] == 0xAA.toByte() &&
+            (value[1] == 0x55.toByte() || value[1] == 0x58.toByte())) {
             processBinaryPacket(value)
         } else {
             val data = String(value, Charsets.UTF_8)
@@ -977,18 +1005,58 @@ class BleViewModel : ViewModel() {
             }
         }
 
+        val protocol = if (decoded.timing == null) 1 else 2
+        if (lastTimingProtocol != 0 && lastTimingProtocol != protocol) {
+            invalidatePendingTrigger()
+            acquisitionTimeline.reset()
+            lowGBuffer.clear(); highGBuffer.clear(); gyroBuffer.clear()
+            _chartData.value = ChartData()
+            resetFilterState(); lastAttitudeCalcTimeMs = 0L
+            timingDiscontinuities++
+        }
+        lastTimingProtocol = protocol
+        val timedBatch = if (decoded.timing != null) acquisitionTimeline.accept(decoded) else null
+        if (decoded.timing != null && timedBatch == null) {
+            timingRejected++
+            receiveMeter.invalidPacket()
+            _timingStatus.value = "Rejected duplicate/reordered/inconsistent timing packet ($timingRejected)"
+            return
+        }
         receiveMeter.record(decoded.sampleCount, decoded.seq)
         lastSamplePacketArrivalMs = SystemClock.elapsedRealtime()
+        if (timedBatch != null && (timedBatch.newSegment || timedBatch.discontinuity)) {
+            invalidatePendingTrigger()
+            // Until E011/E012 support intervals across gaps, never connect or
+            // analyze the old and new intervals as one continuous record.
+            lowGBuffer.clear(); highGBuffer.clear(); gyroBuffer.clear()
+            _chartData.value = ChartData()
+            resetFilterState(); lastAttitudeCalcTimeMs = 0L
+            _isCalibrating.value = false
+            isBaselineInitialized = false
+        }
+        timingGapSamples += timedBatch?.gapSamples ?: 0
+        if (timedBatch?.discontinuity == true) timingDiscontinuities++
+        val timing = decoded.timing
+        _timingStatus.value = if (timing == null) {
+            "Legacy/combined stream: arrival-estimated time; precision timing unavailable"
+        } else {
+            "FIFO rate-estimated device time · segment ${timing.segmentId} · missing samples $timingGapSamples" +
+                " · history breaks $timingDiscontinuities (upstream loss may be unknown)"
+        }
         val rawNowMs = (SystemClock.elapsedRealtimeNanos() - sessionStartNanos) / 1_000_000.0
-        // Keep timestamps ordered without adding artificial 20 ms per BLE packet.
         val nowMs = maxOf(rawNowMs, lastAssignedTimeMs + 0.001)
-        val dt = ((nowMs - lastAssignedTimeMs) / decoded.sampleCount.coerceAtLeast(1)).toFloat()
+        val dt = ((nowMs - lastAssignedTimeMs) / decoded.sampleCount).toFloat()
         val baseTime = lastAssignedTimeMs.toFloat()
         lastAssignedTimeMs = nowMs
-
-        val lowGList = decoded.lowG.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
-        val highGList = decoded.highG.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
-        val gyroList = decoded.gyro.mapIndexed { i, p -> p.copy(time = baseTime + dt * (i + 1)) }
+        fun timestamp(points: List<AxisPoint>) = points.mapIndexed { i, p ->
+            if (timedBatch == null) p.copy(time = baseTime + dt * (i + 1))
+            else p.copy(time = timedBatch.plotTimesMs[i], acquisitionTimeNs = timedBatch.timesNs[i],
+                sampleIndex = timedBatch.indices[i], timingSegment = timing!!.segmentId,
+                acquisitionBootId = timing.bootId, timingFlags = timing.flags)
+        }
+        val lowGList = timestamp(decoded.lowG)
+        val highGList = timestamp(decoded.highG)
+        val gyroList = timestamp(decoded.gyro)
 
         val filteredLowG = filterLowG(lowGList)
         val filteredHighG = filterHighG(highGList)
@@ -1096,7 +1164,7 @@ class BleViewModel : ViewModel() {
         val offsets = _calibrationOffsets.value
         val effLowG = if (offsets.isCalibrated && newLowG.isNotEmpty()) {
             newLowG.map { pt ->
-                AxisPoint(
+                pt.copy(
                     x = pt.x - offsets.accelX,
                     y = pt.y - offsets.accelY,
                     z = pt.z - offsets.accelZ,
@@ -1109,7 +1177,7 @@ class BleViewModel : ViewModel() {
 
         val effGyro = if (offsets.isCalibrated && newGyro.isNotEmpty()) {
             newGyro.map { pt ->
-                AxisPoint(
+                pt.copy(
                     x = pt.x - offsets.gyroX,
                     y = pt.y - offsets.gyroY,
                     z = pt.z - offsets.gyroZ,
@@ -1146,21 +1214,28 @@ class BleViewModel : ViewModel() {
         if (_isPaused.value) return
         if (lowGList.isEmpty() && gyroList.isEmpty()) return
 
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         val dtTotal = if (lastAttitudeCalcTimeMs > 0L) {
             ((now - lastAttitudeCalcTimeMs) / 1000f).coerceIn(0.001f, 0.2f)
         } else {
+            lastAttitudeSampleNs = null
             0.02f
         }
         lastAttitudeCalcTimeMs = now
 
         val count = maxOf(lowGList.size, gyroList.size)
         if (count == 0) return
-        val dtPerSample = dtTotal / count
+        val legacyDtPerSample = dtTotal / count
 
         for (i in 0 until count) {
             val lg = lowGList.getOrNull(i) ?: lowGList.lastOrNull()
             val gy = gyroList.getOrNull(i) ?: gyroList.lastOrNull()
+            val sampleNs = gy?.acquisitionTimeNs ?: lg?.acquisitionTimeNs
+            val dtPerSample = if (sampleNs != null) {
+                val previousNs = lastAttitudeSampleNs
+                lastAttitudeSampleNs = sampleNs
+                if (previousNs == null) 0f else ((sampleNs - previousNs) / 1_000_000_000.0).toFloat()
+            } else legacyDtPerSample
 
             val gxDps = (gy?.x ?: 0f) / 1000f // Pitch rate (around X)
             val gyDps = (gy?.y ?: 0f) / 1000f // Roll rate (around Y)
@@ -1281,6 +1356,7 @@ class BleViewModel : ViewModel() {
     }
 
     fun disconnect() {
+        invalidatePendingTrigger()
         stopScan()
         _availableDevices.value = emptyList()
         _connectedDevice.value = null
@@ -1367,6 +1443,7 @@ class BleViewModel : ViewModel() {
      */
     fun syncFullConfigurationToDevice() {
         if (_connectionState.value != ConnectionState.Connected) return
+        sendCommand("proto2")
         sendCommand(if (_isPaused.value) "pause" else "resume")
         sendCommand("range_low_g_${_lowGRange.value}")
         sendCommand("range_high_g_${_highGRange.value}")
@@ -1717,6 +1794,7 @@ fun BleAppScreen(
     val logMessages by viewModel.logMessages.collectAsState()
     val receivedSamplesPerSecond by viewModel.receivedSamplesPerSecond.collectAsState()
     val diagnosticsEnabled by viewModel.diagnosticsEnabled.collectAsState()
+    val timingStatus by viewModel.timingStatus.collectAsState()
     val firmwareDiagnostics by viewModel.firmwareDiagnostics.collectAsState()
     val firmwareRates by viewModel.firmwareRates.collectAsState()
     val receiveMetrics by viewModel.receiveMetrics.collectAsState()
@@ -1990,6 +2068,7 @@ fun BleAppScreen(
             if (diagnosticsEnabled) {
                 StreamDiagnosticsPanel(firmwareDiagnostics, firmwareRates, receiveMetrics)
             }
+            Text(timingStatus, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall)
 
             // Graph mode selector
             Row(

@@ -7,6 +7,26 @@
 #define IMU_PACKET_BYTES 512
 #define IMU_TX_QUEUE_CAPACITY 16
 
+/* Wire types: ESP32-C3 little-endian; no padding. See TIMING_PROTOCOL.md. */
+typedef struct __attribute__((packed)) {
+    uint8_t magic0, magic1, mode, sample_count, xl_fs, hg_fs, gy_fs, seq, fmt;
+} imu_binary_header_t;
+typedef struct __attribute__((packed)) {
+    imu_binary_header_t base;
+    uint8_t version, flags, header_bytes;
+    uint32_t boot_id, segment_id, first_sample;
+    uint64_t first_time_ns;
+    uint32_t period_ns;
+} imu_timed_header_t;
+_Static_assert(sizeof(imu_binary_header_t) == 9, "v1 wire layout");
+_Static_assert(sizeof(imu_timed_header_t) == 36, "v2 wire layout");
+
+static inline uint64_t imu_timing_anchor_ns(uint64_t now_ns, uint16_t level, uint32_t period_ns)
+{
+    uint64_t age = level ? (uint64_t)(level - 1) * period_ns : 0;
+    return now_ns > age ? now_ns - age : 0;
+}
+
 typedef struct {
     uint16_t len;
     uint8_t samples;

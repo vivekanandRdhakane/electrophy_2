@@ -24,7 +24,8 @@ data class DecodedPacket(
     val fmt: Int,
     val lowG: List<AxisPoint>,
     val highG: List<AxisPoint>,
-    val gyro: List<AxisPoint>
+    val gyro: List<AxisPoint>,
+    val timing: PacketTiming? = null
 )
 
 /**
@@ -72,6 +73,7 @@ object PacketDecoder {
     const val MAGIC_0: Byte = 0xAA.toByte()
     const val MAGIC_1: Byte = 0x55.toByte()
     const val HEADER_SIZE: Int = 9
+    const val TIMED_HEADER_SIZE: Int = 36
 
     const val FMT_RAW16: Int = 0
     const val FMT_PACKED12: Int = 1
@@ -124,7 +126,8 @@ object PacketDecoder {
             return DecodeResult.Error("Packet smaller than header: size=${bytes.size} < $HEADER_SIZE")
         }
 
-        if (bytes[0] != MAGIC_0 || bytes[1] != MAGIC_1) {
+        val timed = bytes[1] == 0x58.toByte()
+        if (bytes[0] != MAGIC_0 || (bytes[1] != MAGIC_1 && !timed)) {
             return DecodeResult.Error(
                 "Invalid magic: expected [0xAA, 0x55], got [0x${(bytes[0].toInt() and 0xFF).toString(16)}, 0x${(bytes[1].toInt() and 0xFF).toString(16)}]"
             )
@@ -137,6 +140,25 @@ object PacketDecoder {
         val gyFs = bytes[6].toInt() and 0xFF
         val seq = bytes[7].toInt() and 0xFF
         val fmt = bytes[8].toInt() and 0xFF
+        val headerSize = if (timed) TIMED_HEADER_SIZE else HEADER_SIZE
+        val timing = if (timed) {
+            if (bytes.size < headerSize) return DecodeResult.Error("Truncated v2 header")
+            if (bytes[9] != 2.toByte() || bytes[11].toInt() != headerSize)
+                return DecodeResult.Error("Unsupported timing version/header size")
+            val flags = bytes[10].toInt() and 255
+            if (flags and 0xfc != 0 || flags and 1 == 0)
+                return DecodeResult.Error("Unsupported timing flags")
+            if (mode !in listOf(MODE_LOW_ACC, MODE_HIGH_ACC, MODE_ONLY_GYRO))
+                return DecodeResult.Error("v2 requires single-sensor FIFO mode")
+            val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            fun u32(offset: Int) = b.getInt(offset).toLong() and 0xffff_ffffL
+            val firstNs = b.getLong(24)
+            val periodNs = u32(32)
+            if (firstNs < 0 || periodNs !in 1..1_000_000_000L ||
+                firstNs > Long.MAX_VALUE - (sampleCount - 1L).coerceAtLeast(0) * periodNs)
+                return DecodeResult.Error("Invalid acquisition time/period")
+            PacketTiming(u32(12), u32(16), u32(20), firstNs, periodNs, flags)
+        } else null
 
         if (sampleCount == 0) {
             return DecodeResult.Error("Sample count is zero")
@@ -168,10 +190,11 @@ object PacketDecoder {
         } else 0f
 
         // Validate packet payload length
-        val requiredBytes = calculateRequiredBytes(mode, sampleCount, fmt)
+        val legacyRequiredBytes = calculateRequiredBytes(mode, sampleCount, fmt)
             ?: return DecodeResult.Error("Failed to calculate required packet length")
+        val requiredBytes = legacyRequiredBytes + headerSize - HEADER_SIZE
 
-        if (bytes.size < requiredBytes) {
+        if (bytes.size != requiredBytes) {
             return DecodeResult.Error(
                 "Truncated packet: buffer size=${bytes.size} < requiredBytes=$requiredBytes for sampleCount=$sampleCount, mode=$mode, fmt=$fmt"
             )
@@ -182,9 +205,9 @@ object PacketDecoder {
         val gyroList = mutableListOf<AxisPoint>()
 
         try {
-            val bitReader = if (packed12) StrictBitReader(bytes, startBit = HEADER_SIZE * 8) else null
+            val bitReader = if (packed12) StrictBitReader(bytes, startBit = headerSize * 8) else null
             val byteBuffer = if (!packed12) {
-                ByteBuffer.wrap(bytes, HEADER_SIZE, bytes.size - HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                ByteBuffer.wrap(bytes, headerSize, bytes.size - headerSize).order(ByteOrder.LITTLE_ENDIAN)
             } else null
 
             fun readAxis(scale: Float): Float {
@@ -238,7 +261,8 @@ object PacketDecoder {
                 fmt = fmt,
                 lowG = lowGList,
                 highG = highGList,
-                gyro = gyroList
+                gyro = gyroList,
+                timing = timing
             )
         )
     }

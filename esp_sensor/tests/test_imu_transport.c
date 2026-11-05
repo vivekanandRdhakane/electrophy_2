@@ -1,7 +1,30 @@
 /* Host test: cc -std=c11 -Wall -Wextra -Werror tests/test_imu_transport.c -o transport_test */
 #include <assert.h>
 #include <stdio.h>
+#include <stddef.h>
 #include "../main/imu_transport.h"
+
+_Static_assert(offsetof(imu_timed_header_t, boot_id) == 12, "boot offset");
+_Static_assert(offsetof(imu_timed_header_t, segment_id) == 16, "segment offset");
+_Static_assert(offsetof(imu_timed_header_t, first_sample) == 20, "counter offset");
+_Static_assert(offsetof(imu_timed_header_t, first_time_ns) == 24, "timestamp offset");
+_Static_assert(offsetof(imu_timed_header_t, period_ns) == 32, "period offset");
+
+static void test_timing(void)
+{
+    assert(imu_timing_anchor_ns(1000000000ULL, 16, 130208) == 998046880ULL);
+    assert(imu_timing_anchor_ns(1000000000ULL, 1, 130208) == 1000000000ULL);
+    assert(imu_timing_anchor_ns(1, 32, 130208) == 0); /* no unsigned underflow */
+    assert((512 - sizeof(imu_timed_header_t)) * 8 / 36 == 105);
+    assert((244 - sizeof(imu_timed_header_t)) * 8 / 36 == 46);
+    imu_timed_header_t header = {0};
+    header.base.magic0 = 0xaa; header.base.magic1 = 0x58;
+    header.version = 2; header.flags = 1; header.header_bytes = 36;
+    header.boot_id = 7; header.segment_id = 2; header.first_sample = 0;
+    header.first_time_ns = 1000000000ULL; header.period_ns = 130208;
+    const uint8_t *bytes = (const uint8_t *)&header;
+    assert(bytes[12] == 7 && bytes[16] == 2 && bytes[24] == 0 && bytes[25] == 0xca);
+}
 
 static void test_packing(void)
 {
@@ -55,6 +78,7 @@ static void test_queue_backpressure(void)
 
 int main(void)
 {
+    test_timing();
     test_packing();
     test_queue_backpressure();
     puts("IMU packing and bounded queue tests passed");

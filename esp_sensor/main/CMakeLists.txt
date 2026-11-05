@@ -1,3 +1,9 @@
+if(IDF_VERSION_MAJOR EQUAL 5 AND IDF_VERSION_MINOR LESS 3)
+    set(imu_driver_components driver)
+else()
+    set(imu_driver_components esp_driver_spi esp_driver_gpio esp_driver_ledc)
+endif()
+
 idf_component_register(
     SRCS
         "main.c"
@@ -8,6 +14,4 @@ idf_component_register(
         bt
         nvs_flash
         esp_adc
-        esp_driver_spi
-        esp_driver_gpio
-        esp_driver_ledc)
+        ${imu_driver_components})
