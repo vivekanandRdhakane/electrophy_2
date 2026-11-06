@@ -45,7 +45,8 @@ fun NewtonsThirdLawScreen(
     first: BleViewModel,
     second: BleViewModel,
     mode: ExperimentMode,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onBackToRawData: () -> Unit = onBack
 ) {
     val firstState by first.connectionState.collectAsState()
     val secondState by second.connectionState.collectAsState()
@@ -228,7 +229,10 @@ fun NewtonsThirdLawScreen(
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Newton's Third Law") },
-            navigationIcon = { TextButton(onClick = onBack) { Text("Back") } }
+            navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+            actions = {
+                TextButton(onClick = onBackToRawData) { Text("Raw Data") }
+            }
         )
     }) { padding ->
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {

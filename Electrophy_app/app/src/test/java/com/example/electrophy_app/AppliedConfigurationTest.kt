@@ -111,5 +111,37 @@ class AppliedConfigurationTest {
         assertNotNull(withError.lastError)
         assertTrue(withError.lastError!!.contains("range_low_g_99g"))
     }
+
+    @Test
+    fun rawDataDefaults_matchesStandardAppStartupConfiguration() {
+        assertEquals(GraphMode.LOW_G, RawDataDefaults.mode)
+        assertEquals("2g", RawDataDefaults.lowGRange)
+        assertEquals("320g", RawDataDefaults.highGRange)
+        assertEquals("2000dps", RawDataDefaults.gyroRange)
+        assertEquals("15hz", RawDataDefaults.lowGOdr)
+        assertEquals("480hz", RawDataDefaults.highGOdr)
+        assertEquals("15hz", RawDataDefaults.gyroOdr)
+        assertEquals(5f, RawDataDefaults.timeWindowSec, 1e-4f)
+        assertFalse(RawDataDefaults.isFilterEnabled)
+        assertEquals(0.2f, RawDataDefaults.filterAlpha, 1e-4f)
+        assertFalse(RawDataDefaults.isAutoTriggerEnabled)
+        assertEquals("Z", RawDataDefaults.autoTriggerAxis)
+        assertEquals("Below", RawDataDefaults.autoTriggerCondition)
+        assertEquals(50f, RawDataDefaults.autoTriggerThreshold, 1e-4f)
+        assertEquals(200L, RawDataDefaults.autoTriggerDelayMs)
+        assertFalse(RawDataDefaults.isPaused)
+    }
+
+    @Test
+    fun appliedConfiguration_matchesRawDataDefaultsByDefault() {
+        val defaultApplied = AppliedConfiguration()
+        assertEquals(RawDataDefaults.mode, defaultApplied.mode)
+        assertEquals(RawDataDefaults.lowGRange, defaultApplied.lowGRange)
+        assertEquals(RawDataDefaults.highGRange, defaultApplied.highGRange)
+        assertEquals(RawDataDefaults.gyroRange, defaultApplied.gyroRange)
+        assertEquals(RawDataDefaults.lowGOdr, defaultApplied.lowGOdr)
+        assertEquals(RawDataDefaults.highGOdr, defaultApplied.highGOdr)
+        assertEquals(RawDataDefaults.gyroOdr, defaultApplied.gyroOdr)
+    }
 }
 

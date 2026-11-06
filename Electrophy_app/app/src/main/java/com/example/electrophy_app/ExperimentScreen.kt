@@ -46,6 +46,7 @@ fun ExperimentScreen(
     mode: ExperimentMode,
     viewModel: BleViewModel,
     onBack: () -> Unit,
+    onBackToRawData: () -> Unit = onBack
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
     val timingStatus by viewModel.timingStatus.collectAsState()
@@ -211,6 +212,9 @@ fun ExperimentScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = onBackToRawData) {
+                        Text("Raw Data", color = MaterialTheme.colorScheme.primary)
+                    }
                     val color = when (connectionState) {
                         ConnectionState.Connected -> Color.Green
                         ConnectionState.Scanning -> Color.Yellow

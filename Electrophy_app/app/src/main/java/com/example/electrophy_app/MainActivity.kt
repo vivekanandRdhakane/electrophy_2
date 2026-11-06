@@ -16,6 +16,7 @@ import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -520,25 +521,25 @@ class BleViewModel : ViewModel() {
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording
 
-    private val _selectedMode = MutableStateFlow(GraphMode.LOW_G)
+    private val _selectedMode = MutableStateFlow(RawDataDefaults.mode)
     val selectedMode: StateFlow<GraphMode> = _selectedMode
 
-    private val _lowGOdr = MutableStateFlow("15hz")
+    private val _lowGOdr = MutableStateFlow(RawDataDefaults.lowGOdr)
     val lowGOdr: StateFlow<String> = _lowGOdr
 
-    private val _highGOdr = MutableStateFlow("480hz")
+    private val _highGOdr = MutableStateFlow(RawDataDefaults.highGOdr)
     val highGOdr: StateFlow<String> = _highGOdr
 
-    private val _gyroOdr = MutableStateFlow("15hz")
+    private val _gyroOdr = MutableStateFlow(RawDataDefaults.gyroOdr)
     val gyroOdr: StateFlow<String> = _gyroOdr
 
-    private val _lowGRange = MutableStateFlow("2g")
+    private val _lowGRange = MutableStateFlow(RawDataDefaults.lowGRange)
     val lowGRange: StateFlow<String> = _lowGRange
 
-    private val _highGRange = MutableStateFlow("320g")
+    private val _highGRange = MutableStateFlow(RawDataDefaults.highGRange)
     val highGRange: StateFlow<String> = _highGRange
 
-    private val _gyroRange = MutableStateFlow("2000dps")
+    private val _gyroRange = MutableStateFlow(RawDataDefaults.gyroRange)
     val gyroRange: StateFlow<String> = _gyroRange
 
     private val _appliedConfig = MutableStateFlow(AppliedConfiguration())
@@ -556,10 +557,10 @@ class BleViewModel : ViewModel() {
             _selectedMode.value != _appliedConfig.value.mode
         )
 
-    private val _timeWindowSec = MutableStateFlow(5f)
+    private val _timeWindowSec = MutableStateFlow(RawDataDefaults.timeWindowSec)
     val timeWindowSec: StateFlow<Float> = _timeWindowSec
 
-    private val _isPaused = MutableStateFlow(false)
+    private val _isPaused = MutableStateFlow(RawDataDefaults.isPaused)
     val isPaused: StateFlow<Boolean> = _isPaused
 
     fun togglePause() {
@@ -1775,6 +1776,57 @@ class BleViewModel : ViewModel() {
         sendCommand("resume")
     }
 
+    /**
+     * Resets sensor parameters and ViewModel state back to canonical Raw Data Mode defaults.
+     * Invoked whenever switching from any experiment mode back to Raw Data Mode.
+     */
+    fun resetToRawDataDefaults() {
+        _isConfiguring.value = _connectionState.value == ConnectionState.Connected
+        invalidatePendingTrigger()
+        cancelPendingCaptureTrigger()
+        onPairedHighGBatch = null
+        onThresholdCrossed = null
+        onPairedStreamInterrupted = null
+        onPairedSegmentChanged = null
+
+        // 1. Reset Full-Scale Ranges to raw data defaults
+        _lowGRange.value = RawDataDefaults.lowGRange
+        _highGRange.value = RawDataDefaults.highGRange
+        _gyroRange.value = RawDataDefaults.gyroRange
+
+        // 2. Reset Output Data Rates to raw data defaults
+        _lowGOdr.value = RawDataDefaults.lowGOdr
+        _highGOdr.value = RawDataDefaults.highGOdr
+        _gyroOdr.value = RawDataDefaults.gyroOdr
+
+        // 3. Reset Stream Mode to raw data default (Low-G)
+        _selectedMode.value = RawDataDefaults.mode
+
+        // 4. Reset Filter (disabled, alpha 0.2f)
+        _isFilterEnabled.value = RawDataDefaults.isFilterEnabled
+        _filterAlpha.value = RawDataDefaults.filterAlpha
+        resetFilterState()
+
+        // 5. Reset Auto-Trigger (disabled, axis Z, Below, 50g, 200ms)
+        _isAutoTriggerEnabled.value = RawDataDefaults.isAutoTriggerEnabled
+        _autoTriggerAxis.value = RawDataDefaults.autoTriggerAxis
+        _autoTriggerCondition.value = RawDataDefaults.autoTriggerCondition
+        _autoTriggerThreshold.value = RawDataDefaults.autoTriggerThreshold
+        _autoTriggerDelayMs.value = RawDataDefaults.autoTriggerDelayMs
+
+        // 6. Reset Time Window (5s)
+        _timeWindowSec.value = RawDataDefaults.timeWindowSec
+
+        // 7. Reset Paused state
+        _isPaused.value = RawDataDefaults.isPaused
+
+        clearLogs()
+
+        if (_connectionState.value == ConnectionState.Connected) {
+            syncFullConfigurationToDevice()
+        }
+    }
+
     fun clearLogs() {
         lowGBuffer.clear()
         highGBuffer.clear()
@@ -1920,9 +1972,24 @@ fun AppRouter(viewModel: BleViewModel = viewModel()) {
     // "raw" = Raw Data Mode (Home), null = Experiment Picker, else = specific experiment
     var currentScreen by remember { mutableStateOf<String?>("raw") }
     var activeExperiment by remember { mutableStateOf<ExperimentMode?>(null) }
+    var hadActiveExperiment by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentScreen) {
+        if (currentScreen != "raw" && currentScreen != null) {
+            hadActiveExperiment = true
+        } else if (currentScreen == "raw" && hadActiveExperiment) {
+            viewModel.resetToRawDataDefaults()
+            secondViewModel.resetToRawDataDefaults()
+            hadActiveExperiment = false
+            activeExperiment = null
+        }
+    }
 
     when {
         currentScreen == null -> {
+            BackHandler {
+                currentScreen = "raw"
+            }
             ExperimentPickerScreen(
                 onExperimentSelected = { mode ->
                     activeExperiment = mode
@@ -1945,18 +2012,23 @@ fun AppRouter(viewModel: BleViewModel = viewModel()) {
         else -> {
             val mode = activeExperiment
             if (mode != null) {
+                BackHandler {
+                    currentScreen = null
+                }
                 if (mode.id == "newtons_third_law") {
                     NewtonsThirdLawScreen(
                         first = viewModel,
                         second = secondViewModel,
                         mode = mode,
-                        onBack = { currentScreen = null }
+                        onBack = { currentScreen = null },
+                        onBackToRawData = { currentScreen = "raw" }
                     )
                 } else {
                     ExperimentScreen(
                         mode = mode,
                         viewModel = activeViewModel,
-                        onBack = { currentScreen = null }
+                        onBack = { currentScreen = null },
+                        onBackToRawData = { currentScreen = "raw" }
                     )
                 }
             }
