@@ -309,4 +309,33 @@ class PairedCollisionControllerTest {
         c.accept(0, points(0, 0, 200, segment = 2), 1600)
         assertEquals(PairPhase.ARMED, c.state.value.phase)
     }
+
+    @Test
+    fun computePlanarPeakG_extractsLargestMagnitudeSignedPeak() {
+        // Empty list returns 0f
+        assertEquals(0f, computePlanarPeakG(emptyList(), PlanarZero(), true), 1e-4f)
+
+        // Positive peak along X
+        val ptsPos = listOf(
+            AxisPoint(10f, 0f, 0f, 0f),
+            AxisPoint(62f, 0f, 0f, 1f),
+            AxisPoint(20f, 0f, 0f, 2f)
+        )
+        assertEquals(62f, computePlanarPeakG(ptsPos, PlanarZero(), true), 1e-4f)
+
+        // Negative peak with greater magnitude along X
+        val ptsNeg = listOf(
+            AxisPoint(15f, 0f, 0f, 0f),
+            AxisPoint(-63.5f, 0f, 0f, 1f),
+            AxisPoint(40f, 0f, 0f, 2f)
+        )
+        assertEquals(-63.5f, computePlanarPeakG(ptsNeg, PlanarZero(), true), 1e-4f)
+
+        // With baseline zero
+        val zero = PlanarZero(x = 2f, y = 1f)
+        val ptsZero = listOf(
+            AxisPoint(62f, 1f, 0f, 0f) // net x = 60f
+        )
+        assertEquals(60f, computePlanarPeakG(ptsZero, zero, true), 1e-4f)
+    }
 }

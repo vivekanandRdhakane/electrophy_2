@@ -200,5 +200,124 @@ object SensorConversion {
         "7680hz" -> 7680f
         else -> 0f
     }
+
+    /**
+     * Default ratio of full-scale range to flag near-saturation (60 g on ±64 g = 0.9375 = 93.75%).
+     */
+    const val DEFAULT_SATURATION_RATIO: Float = 60f / 64f
+
+    /**
+     * Parses the numeric full-scale acceleration limit in g from a range suffix string.
+     * Supports High-G ("32g", "64g", "128g", "256g", "320g") and Low-G ("2g", "4g", "8g", "16g"),
+     * as well as formatted strings like "±64 g".
+     */
+    fun parseRangeLimitG(rangeSuffix: String): Float? {
+        val clean = rangeSuffix.replace("±", "").replace("g", "").replace("G", "").trim()
+        return when (clean) {
+            "2" -> 2f
+            "4" -> 4f
+            "8" -> 8f
+            "16" -> 16f
+            "32" -> 32f
+            "64" -> 64f
+            "128" -> 128f
+            "256" -> 256f
+            "320" -> 320f
+            else -> clean.toFloatOrNull()
+        }
+    }
+
+    /**
+     * Returns the next higher range suffix for a given range suffix,
+     * or null if the sensor is already at its maximum range.
+     */
+    fun getNextHigherRangeSuffix(rangeSuffix: String): String? {
+        val clean = rangeSuffix.replace("±", "").replace("g", "").replace("G", "").trim().lowercase()
+        return when (clean) {
+            "2" -> "4g"
+            "4" -> "8g"
+            "8" -> "16g"
+            "16" -> "32g"
+            "32" -> "64g"
+            "64" -> "128g"
+            "128" -> "256g"
+            "256" -> "320g"
+            "320" -> null
+            else -> null
+        }
+    }
+
+    /**
+     * Returns a human-friendly display label for a range suffix (e.g. "64g" -> "±64 g").
+     */
+    fun formatRangeLabel(rangeSuffix: String): String {
+        val limit = parseRangeLimitG(rangeSuffix)
+        return if (limit != null) {
+            val intLimit = limit.toInt()
+            if (limit == intLimit.toFloat()) "±$intLimit g" else "±$limit g"
+        } else {
+            rangeSuffix
+        }
+    }
+
+    /**
+     * Evaluates whether an observed peak acceleration (in g) is near or at the full-scale limit.
+     *
+     * @param peakG Observed peak acceleration (signed or absolute).
+     * @param rangeSuffix Range suffix string (e.g. "64g", "32g", "128g", "256g", "320g", "16g", etc.).
+     * @param thresholdRatio Ratio of full-scale limit to trigger warning (defaults to 0.9375 = 60/64).
+     */
+    fun checkRangeSaturation(
+        peakG: Float,
+        rangeSuffix: String,
+        thresholdRatio: Float = DEFAULT_SATURATION_RATIO
+    ): RangeSaturationResult {
+        val limit = parseRangeLimitG(rangeSuffix) ?: return RangeSaturationResult(
+            isNearSaturation = false,
+            peakG = peakG,
+            limitG = 0f,
+            saturationThresholdG = 0f,
+            ratio = 0f,
+            currentRangeSuffix = rangeSuffix,
+            currentRangeLabel = formatRangeLabel(rangeSuffix),
+            recommendedRangeSuffix = null,
+            recommendedRangeLabel = null
+        )
+        val absPeak = kotlin.math.abs(peakG)
+        val threshold = limit * thresholdRatio
+        val isNear = absPeak >= threshold
+        val ratio = if (limit > 0f) absPeak / limit else 0f
+        val nextSuffix = getNextHigherRangeSuffix(rangeSuffix)
+        val nextLabel = nextSuffix?.let { formatRangeLabel(it) }
+
+        return RangeSaturationResult(
+            isNearSaturation = isNear,
+            peakG = peakG,
+            limitG = limit,
+            saturationThresholdG = threshold,
+            ratio = ratio,
+            currentRangeSuffix = rangeSuffix,
+            currentRangeLabel = formatRangeLabel(rangeSuffix),
+            recommendedRangeSuffix = nextSuffix,
+            recommendedRangeLabel = nextLabel
+        )
+    }
 }
+
+/**
+ * Result data class describing whether an observed peak acceleration approaches or exceeds
+ * the full-scale saturation limit of the active range.
+ */
+data class RangeSaturationResult(
+    val isNearSaturation: Boolean,
+    val peakG: Float,
+    val limitG: Float,
+    val saturationThresholdG: Float,
+    val ratio: Float,
+    val currentRangeSuffix: String,
+    val currentRangeLabel: String,
+    val recommendedRangeSuffix: String?,
+    val recommendedRangeLabel: String?
+)
+
 

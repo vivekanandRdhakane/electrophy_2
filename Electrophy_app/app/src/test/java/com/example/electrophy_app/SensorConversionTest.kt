@@ -131,5 +131,89 @@ class SensorConversionTest {
         assertNull(SensorConversion.getGyroSensitivityMdps(255))
         assertNull(SensorConversion.rawGyroToMdps(100, gyFs = 6, packed12 = false))
     }
+
+    @Test
+    fun parseRangeLimitG_parsesHighGAndLowGCorrectly() {
+        assertEquals(2f, SensorConversion.parseRangeLimitG("2g")!!, floatTolerance)
+        assertEquals(4f, SensorConversion.parseRangeLimitG("4g")!!, floatTolerance)
+        assertEquals(8f, SensorConversion.parseRangeLimitG("8g")!!, floatTolerance)
+        assertEquals(16f, SensorConversion.parseRangeLimitG("16g")!!, floatTolerance)
+        assertEquals(32f, SensorConversion.parseRangeLimitG("32g")!!, floatTolerance)
+        assertEquals(64f, SensorConversion.parseRangeLimitG("64g")!!, floatTolerance)
+        assertEquals(128f, SensorConversion.parseRangeLimitG("128g")!!, floatTolerance)
+        assertEquals(256f, SensorConversion.parseRangeLimitG("256g")!!, floatTolerance)
+        assertEquals(320f, SensorConversion.parseRangeLimitG("320g")!!, floatTolerance)
+
+        // Formatted strings with ±, whitespace, and units
+        assertEquals(64f, SensorConversion.parseRangeLimitG("±64 g")!!, floatTolerance)
+        assertEquals(320f, SensorConversion.parseRangeLimitG("±320g")!!, floatTolerance)
+        assertEquals(32f, SensorConversion.parseRangeLimitG(" 32 G ")!!, floatTolerance)
+    }
+
+    @Test
+    fun getNextHigherRangeSuffix_stepsUpCorrectly() {
+        assertEquals("64g", SensorConversion.getNextHigherRangeSuffix("32g"))
+        assertEquals("128g", SensorConversion.getNextHigherRangeSuffix("64g"))
+        assertEquals("256g", SensorConversion.getNextHigherRangeSuffix("128g"))
+        assertEquals("320g", SensorConversion.getNextHigherRangeSuffix("256g"))
+        assertNull("320g is the maximum range and cannot step up", SensorConversion.getNextHigherRangeSuffix("320g"))
+
+        assertEquals("4g", SensorConversion.getNextHigherRangeSuffix("2g"))
+        assertEquals("8g", SensorConversion.getNextHigherRangeSuffix("4g"))
+        assertEquals("16g", SensorConversion.getNextHigherRangeSuffix("8g"))
+        assertEquals("32g", SensorConversion.getNextHigherRangeSuffix("16g"))
+    }
+
+    @Test
+    fun checkRangeSaturation_triggersAtOrAbove60gFor64gRange() {
+        // User specification: ±64g range with observed peak around it (e.g. above 60g)
+        val belowThreshold = SensorConversion.checkRangeSaturation(58.0f, "64g")
+        org.junit.Assert.assertFalse("58g on 64g is below 93.75% threshold", belowThreshold.isNearSaturation)
+
+        val atThreshold = SensorConversion.checkRangeSaturation(60.0f, "64g")
+        org.junit.Assert.assertTrue("60g on 64g must trigger near-saturation", atThreshold.isNearSaturation)
+        assertEquals("128g", atThreshold.recommendedRangeSuffix)
+        assertEquals("±128 g", atThreshold.recommendedRangeLabel)
+
+        val aboveThreshold = SensorConversion.checkRangeSaturation(62.5f, "64g")
+        org.junit.Assert.assertTrue("62.5g on 64g must trigger near-saturation", aboveThreshold.isNearSaturation)
+
+        // Negative peak symmetry
+        val negativePeak = SensorConversion.checkRangeSaturation(-61.2f, "64g")
+        org.junit.Assert.assertTrue("-61.2g on 64g must trigger near-saturation", negativePeak.isNearSaturation)
+    }
+
+    @Test
+    fun checkRangeSaturation_appliesToOtherRanges() {
+        // 32g: threshold = 30.0g
+        org.junit.Assert.assertFalse(SensorConversion.checkRangeSaturation(28.0f, "32g").isNearSaturation)
+        val sat32 = SensorConversion.checkRangeSaturation(30.5f, "32g")
+        org.junit.Assert.assertTrue(sat32.isNearSaturation)
+        assertEquals("64g", sat32.recommendedRangeSuffix)
+
+        // 128g: threshold = 120.0g
+        org.junit.Assert.assertFalse(SensorConversion.checkRangeSaturation(115.0f, "128g").isNearSaturation)
+        val sat128 = SensorConversion.checkRangeSaturation(121.0f, "128g")
+        org.junit.Assert.assertTrue(sat128.isNearSaturation)
+        assertEquals("256g", sat128.recommendedRangeSuffix)
+
+        // 256g: threshold = 240.0g
+        org.junit.Assert.assertFalse(SensorConversion.checkRangeSaturation(230.0f, "256g").isNearSaturation)
+        val sat256 = SensorConversion.checkRangeSaturation(245.0f, "256g")
+        org.junit.Assert.assertTrue(sat256.isNearSaturation)
+        assertEquals("320g", sat256.recommendedRangeSuffix)
+
+        // 320g: threshold = 300.0g (maximum range, no higher range)
+        org.junit.Assert.assertFalse(SensorConversion.checkRangeSaturation(290.0f, "320g").isNearSaturation)
+        val sat320 = SensorConversion.checkRangeSaturation(305.0f, "320g")
+        org.junit.Assert.assertTrue(sat320.isNearSaturation)
+        assertNull("320g has no higher range", sat320.recommendedRangeSuffix)
+
+        // Low-G 8g: threshold = 7.5g
+        org.junit.Assert.assertFalse(SensorConversion.checkRangeSaturation(7.0f, "8g").isNearSaturation)
+        val sat8 = SensorConversion.checkRangeSaturation(7.6f, "8g")
+        org.junit.Assert.assertTrue(sat8.isNearSaturation)
+        assertEquals("16g", sat8.recommendedRangeSuffix)
+    }
 }
 

@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
@@ -58,6 +60,9 @@ fun NewtonsThirdLawScreen(
     val timeWindowSec by first.timeWindowSec.collectAsState()
     val highGOdr by first.highGOdr.collectAsState()
     val highGRange by first.highGRange.collectAsState()
+    val firstHighGRange by first.highGRange.collectAsState()
+    val secondHighGRange by second.highGRange.collectAsState()
+    var saturationWarningDismissed by remember { mutableStateOf(false) }
     val triggerEnabled by first.isAutoTriggerEnabled.collectAsState()
     val triggerCondition by first.autoTriggerCondition.collectAsState()
     val triggerThreshold by first.autoTriggerThreshold.collectAsState()
@@ -119,6 +124,7 @@ fun NewtonsThirdLawScreen(
         second.cancelPendingCaptureTrigger()
         showPrevious = false
         cursorEnabled = false
+        saturationWarningDismissed = false
         if (timeWindowSec < 1f) setTimeWindow(3f)
         if (restartStreaming) {
             first.setCapturePaused(true)
@@ -206,6 +212,7 @@ fun NewtonsThirdLawScreen(
             Log.w("ElectrophyBLE", "Paired capture interrupted run=${run.runId}: ${run.message}")
         }
         if (run.phase == PairPhase.COMPLETE || run.phase == PairPhase.INTERRUPTED) {
+            saturationWarningDismissed = false
             first.cancelPendingCaptureTrigger()
             second.cancelPendingCaptureTrigger()
             if (shouldPauseSensorsForPairPhase(run.phase)) {
@@ -285,6 +292,136 @@ fun NewtonsThirdLawScreen(
                     secondConnectionError?.let { Text("Device 2: $it", Modifier.padding(horizontal = 8.dp),
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
                 }
+                val activeFirstPoints = frozen?.first?.points ?: run.interruptedPoints?.first
+                    ?: if (firstState == ConnectionState.Connected) firstData.highG else emptyList()
+                val activeSecondPoints = frozen?.second?.points ?: run.interruptedPoints?.second
+                    ?: if (secondState == ConnectionState.Connected) secondData.highG else emptyList()
+                val activeAlongX = frozen?.alongX ?: collisionAlongX
+
+                val firstPeakG = remember(activeFirstPoints, firstZero, activeAlongX) {
+                    computePlanarPeakG(activeFirstPoints, firstZero, activeAlongX)
+                }
+                val secondPeakG = remember(activeSecondPoints, secondZero, activeAlongX) {
+                    computePlanarPeakG(activeSecondPoints, secondZero, activeAlongX)
+                }
+                val satFirst = remember(firstPeakG, firstHighGRange) {
+                    SensorConversion.checkRangeSaturation(firstPeakG, firstHighGRange)
+                }
+                val satSecond = remember(secondPeakG, secondHighGRange) {
+                    SensorConversion.checkRangeSaturation(secondPeakG, secondHighGRange)
+                }
+                val isNearSaturation = satFirst.isNearSaturation || satSecond.isNearSaturation
+
+                val next1 = satFirst.recommendedRangeSuffix
+                val next2 = satSecond.recommendedRangeSuffix
+                val lim1 = next1?.let { SensorConversion.parseRangeLimitG(it) } ?: 0f
+                val lim2 = next2?.let { SensorConversion.parseRangeLimitG(it) } ?: 0f
+                val recommendedRange = if (lim1 >= lim2) next1 ?: next2 else next2 ?: next1
+                val recommendedLabel = recommendedRange?.let { SensorConversion.formatRangeLabel(it) }
+
+                val d1Name = frozen?.firstName ?: firstName ?: "Device 1"
+                val d2Name = frozen?.secondName ?: secondName ?: "Device 2"
+                val saturationWarningText = when {
+                    satFirst.isNearSaturation && satSecond.isNearSaturation ->
+                        "Both strikers recorded peaks near range saturation:\n" +
+                        "• $d1Name: ${String.format(Locale.US, "%+.1f g", satFirst.peakG)} (range ${satFirst.currentRangeLabel})\n" +
+                        "• $d2Name: ${String.format(Locale.US, "%+.1f g", satSecond.peakG)} (range ${satSecond.currentRangeLabel})\n" +
+                        "Signal is near saturation. Increase accelerometer range to prevent impact clipping."
+                    satFirst.isNearSaturation ->
+                        "$d1Name recorded a peak of ${String.format(Locale.US, "%+.1f g", satFirst.peakG)}, " +
+                        "which is near saturation for the ${satFirst.currentRangeLabel} range (${(satFirst.ratio * 100).toInt()}% of limit). " +
+                        "Increase accelerometer range to prevent impact clipping."
+                    satSecond.isNearSaturation ->
+                        "$d2Name recorded a peak of ${String.format(Locale.US, "%+.1f g", satSecond.peakG)}, " +
+                        "which is near saturation for the ${satSecond.currentRangeLabel} range (${(satSecond.ratio * 100).toInt()}% of limit). " +
+                        "Increase accelerometer range to prevent impact clipping."
+                    else -> ""
+                }
+
+                if (isNearSaturation && !saturationWarningDismissed) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f),
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    ) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("⚠️", style = MaterialTheme.typography.titleMedium)
+                                    Column {
+                                        Text(
+                                            "Near Range Saturation Warning",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                        Text(
+                                            saturationWarningText,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                    }
+                                }
+                                TextButton(
+                                    onClick = { saturationWarningDismissed = true },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("✕", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+                                }
+                            }
+                            if (recommendedRange != null) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    Button(
+                                        onClick = {
+                                            if (first.highGRange.value != recommendedRange) first.setHighGRange(recommendedRange)
+                                            if (second.highGRange.value != recommendedRange) second.setHighGRange(recommendedRange)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.error,
+                                            contentColor = MaterialTheme.colorScheme.onError
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp)
+                                    ) {
+                                        Text(
+                                            "Increase range to $recommendedLabel",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    "Sensors are at maximum hardware range (±320 g). The impact peak reached the sensor's physical measurement limits.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontStyle = FontStyle.Italic
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Collision direction", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 13.dp))
                     FilterChip(collisionAlongX, onClick = { setAxis(true) }, label = { Text("X") })
@@ -296,16 +433,16 @@ fun NewtonsThirdLawScreen(
                     }
                 }
                 CollisionChart(
-                    firstPoints = frozen?.first?.points ?: run.interruptedPoints?.first
-                        ?: if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
-                    secondPoints = frozen?.second?.points ?: run.interruptedPoints?.second
-                        ?: if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
+                    firstPoints = activeFirstPoints,
+                    secondPoints = activeSecondPoints,
                     firstZero = firstZero,
                     secondZero = secondZero,
-                    collisionAlongX = frozen?.alongX ?: collisionAlongX,
+                    collisionAlongX = activeAlongX,
                     timeWindowMs = windowMs,
                     impactAnchors = capturedPeakTimes,
                     cursorEnabled = cursorEnabled,
+                    firstNearSat = satFirst.isNearSaturation,
+                    secondNearSat = satSecond.isNearSaturation,
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
                 Column(Modifier.fillMaxWidth().heightIn(max = controlsMaxHeight).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -357,6 +494,13 @@ fun NewtonsThirdLawScreen(
                             CompactRangeDropdown("High-G", highGRangeOptions, highGRange, true) {
                                 if (first.highGRange.value != it) first.setHighGRange(it)
                                 if (second.highGRange.value != it) second.setHighGRange(it)
+                            }
+                            if (isNearSaturation) {
+                                Text(
+                                    "⚠️ Observed peak (${String.format(Locale.US, "%.1f g", maxOf(abs(firstPeakG), abs(secondPeakG)))}) is near range saturation for $highGRange. ${if (recommendedLabel != null) "Recommended: $recommendedLabel." else "Sensor is at maximum range."}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
                             }
                     }
                     NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · $postImpactMs ms post-impact" else "Disabled",
@@ -445,6 +589,8 @@ private fun CollisionChart(
     timeWindowMs: Float,
     impactAnchors: Pair<Float, Float>?,
     cursorEnabled: Boolean,
+    firstNearSat: Boolean = false,
+    secondNearSat: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var cursor1 by remember(cursorEnabled) { mutableStateOf<Entry?>(null) }
@@ -652,7 +798,9 @@ private fun CollisionChart(
                     val px = pixel.x.toFloat()
                     val py = pixel.y.toFloat()
                     if (px in 0f..size.width && py in 0f..size.height) {
-                        val label = String.format(java.util.Locale.US, "%.2f g", entry.y)
+                        val isSat = if (paint == peakPaint1) firstNearSat else secondNearSat
+                        val label = if (isSat) String.format(java.util.Locale.US, "%.2f g ⚠️", entry.y)
+                            else String.format(java.util.Locale.US, "%.2f g", entry.y)
                         // Place label above peak if positive, below if negative
                         val labelY = if (entry.y >= 0f) (py - 14f).coerceAtLeast(paint.textSize) else py + paint.textSize + 4f
                         // Clamp label horizontally so it stays within chart

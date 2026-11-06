@@ -14,6 +14,20 @@ internal fun collisionSignedPlanarG(point: AxisPoint, zero: PlanarZero, alongX: 
     if (abs(along) < magnitude * 0.05f) return 0f
     return if (along >= 0f) magnitude else -magnitude
 }
+internal fun computePlanarPeakG(points: List<AxisPoint>, zero: PlanarZero, alongX: Boolean): Float {
+    if (points.isEmpty()) return 0f
+    var maxMag = 0f
+    var peakSigned = 0f
+    for (pt in points) {
+        val g = collisionSignedPlanarG(pt, zero, alongX)
+        val mag = abs(g)
+        if (mag > maxMag) {
+            maxMag = mag
+            peakSigned = g
+        }
+    }
+    return peakSigned
+}
 internal enum class PairPhase { IDLE, BASELINE, ARMED, CAPTURING, COMPLETE, INTERRUPTED }
 /** An interrupted capture freezes locally; only a completed capture stops sensor streaming. */
 internal fun shouldPauseSensorsForPairPhase(phase: PairPhase) = phase == PairPhase.COMPLETE
