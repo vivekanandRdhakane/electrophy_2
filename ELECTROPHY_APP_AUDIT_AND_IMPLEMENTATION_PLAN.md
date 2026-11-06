@@ -74,7 +74,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E005 | ✅ | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
 | E006 | ✅ | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
 | E007 |  | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
-| E008 |  | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
+| E008 | ✅ | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
 | E009 |  | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
 | E010 |  | P1 | Android | Reliable BLE lifecycle and operation completion | High | Sol / High | Pro / High |
 | E011 |  | P1 | Capture | Separate captures, analysis intervals, and chart history | High | Sol / High | Pro / High |
@@ -245,7 +245,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E008 — Propagate SPI/IMU errors
 
-**Status:** [ ] TODO. **Scope:** firmware readiness/error path. **Dependencies:** none.
+**Status:** [x] Complete. **Scope:** firmware readiness/error path. **Dependencies:** none.
 
 **Evidence:** FW:347–370 discards SPI write errors and returns success. FW:382–413 discards read errors, can copy uninitialized receive data on failure, and silently clamps oversized reads. Initialization/acquisition commonly ignore driver results.
 
@@ -1185,6 +1185,43 @@ Hardware/UI verification performed (or explicitly not performed):
 - Explicitly not performed (algorithm and mathematical properties verified via comprehensive unit tests in ComparatorTest.kt).
 Remaining limitations and follow-up task IDs:
 - E012 for cross-sensor hardware time alignment and calibration.
+```
+
+```
+Task: E008
+Date: 2026-11-06
+Status: Complete
+Files modified/created:
+- esp_sensor/main/main.c
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Hardened SPI transport write/read operations (`platform_write` and `platform_read`):
+  * Enforced length validation (`len <= 64`) returning `ESP_ERR_INVALID_SIZE`.
+  * Enforced recursive mutex acquisition with 100 ms timeout returning `ESP_ERR_TIMEOUT`.
+  * Ensured SPI CS pin is asserted low before transaction and deasserted high unconditionally on every return/error path.
+  * Mutex is unconditionally released on all paths.
+  * Clears read destination buffer (`memset(bufp, 0, len)`) on any read failure to prevent copying uninitialized stack/heap memory.
+  * Propagates underlying `esp_err_t` return codes up to the ST sensor driver rather than swallowing errors and returning 0.
+- Hardened sensor initialization and readiness in `sensor_task`:
+  * Implemented bounded retry loop (5 attempts with 20 ms backoff) for `lsm6dsv320x_device_id_get`.
+  * Tracked driver return codes across all IMU initialization calls (`lsm6dsv320x_init_set`, `lsm6dsv320x_reset_set`, `lsm6dsv320x_xl_setup`, `lsm6dsv320x_gy_setup`, etc.).
+  * If initialization fails at any stage, `sensor_ready` is strictly held `false`, fault state (`s_sensor_fault`) is set, an error is logged, and the task remains in an idle watchdog-feeding loop rather than falsely reporting sensor readiness.
+- Implemented runtime bus error tracking and rate-limited bus recovery:
+  * Added `s_stats.spi_errors` and `s_stats.bus_recoveries` to track hardware faults.
+  * Added `s_consecutive_read_errors` tracking across FIFO drain (`imu_fifo_drain`) and direct register reads.
+  * Added rate-limited (250 ms) bus recovery routine `imu_attempt_bus_recovery()` triggered when consecutive read errors reach 10 (`MAX_CONSECUTIVE_READ_ERRORS`). It resets the SPI bus, verifies WHO_AM_I, and logs recovery status.
+- Hardened BLE GATT command interface (`ble_svc_command_access`):
+  * Checked ST driver return codes for all accelerometer and gyroscope ODR / full-scale range commands.
+  * If the ST driver rejects a configuration (e.g. invalid mode/ODR combination), firmware increments `s_stats.spi_errors`, does not mutate state variables, and returns `BLE_ATT_ERR_UNLIKELY` to the BLE central.
+ESP-IDF build result:
+- Built with ESP-IDF v6.1 (`idf.py build`): Target esp32c3, 0 warnings, 0 errors, binary size ~910KB.
+Android build result:
+- Gradle unit test runner passed (./gradlew.bat testDebugUnitTest): 98 tests across 13 test suites, 100% pass.
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed on physical target yet (compiled clean; flashing command provided for COM3).
+Remaining limitations and follow-up task IDs:
+- E007 for atomic applied configuration transactions and configuration ID reporting.
+- E009 for BLE transport pacing and sample loss accounting.
 ```
 
 
