@@ -85,14 +85,20 @@ firmware counters and pending depth too. IDs do not recover lost values.
 
 Android retains nanoseconds, boot/segment IDs, sample indices, and timing flags
 on AxisPoint through filtering/calibration. Only plot coordinates use relative
-Float milliseconds. It rejects unannounced period/range/mode changes. At a segment
-change or missing interval it clears live chart history/filter/baseline state
-and invalidates pending trigger callbacks. This prevents current analyses from
-bridging intervals while E011/E012 capture-aware analysis remains unfinished.
-The UI reports missing samples and history breaks; this does not save the old
-history as an immutable capture. Legacy data still uses explicitly estimated
-arrival timing. v2 gyro integration uses retained device sample time; the broader
-attitude model remains E017.
+Float milliseconds. It rejects unannounced period/range/mode changes. Following
+user feedback and the paired 7,680 Hz Newton stabilization (commit `e5858c3`),
+in-segment missing samples/gaps are tracked in diagnostics (`timingGapSamples`,
+missing-sample counters, and UI status) without clearing live chart history,
+stopping the live plot, or pausing paired runs; sample objects preserve their
+true discontinuous device nanosecond timestamps and sample indices so downstream
+data models retain explicit gaps. Only a true segment change with discontinuity
+(`newSegment && discontinuity`, e.g. reconnect, configuration changes, or FIFO
+fault flush) resets the plot-time origin, clears that device's live chart buffer,
+and invalidates pending single-shot trigger callbacks so unrelated time coordinates
+are not mixed. The UI reports missing samples and history breaks; this does not
+save the old history as an immutable capture. Legacy data still uses explicitly
+estimated arrival timing. v2 gyro integration uses retained device sample time;
+the broader attitude model remains E017.
 
 ## Expected bandwidth cost
 

@@ -751,67 +751,231 @@ object MathEngine {
             cov += da * db
         }
 
-        val stdA = sqrt(varA / n).toFloat().coerceAtLeast(1e-5f)
-        val stdB = sqrt(varB / n).toFloat().coerceAtLeast(1e-5f)
+        val stdA = sqrt(varA / n).toFloat()
+        val stdB = sqrt(varB / n).toFloat()
+        val isConstantA = stdA < 1e-4f
+        val isConstantB = stdB < 1e-4f
+
         val denom = sqrt(varA * varB)
-        val pearsonR = if (denom > 1e-9) (cov / denom).toFloat().coerceIn(-1f, 1f) else 0f
+        val pearsonR = if (!isConstantA && !isConstantB && denom > 1e-9) {
+            (cov / denom).toFloat().coerceIn(-1f, 1f)
+        } else 0f
 
         val alignedA = if (normalize) {
-            tailA.map { ScalarPoint(it.timeMs, (it.value - meanA) / stdA) }
+            if (isConstantA) tailA.map { ScalarPoint(it.timeMs, 0f) }
+            else tailA.map { ScalarPoint(it.timeMs, (it.value - meanA) / stdA) }
         } else {
             tailA
         }
 
         val alignedB = if (normalize) {
-            tailB.map { ScalarPoint(it.timeMs, (it.value - meanB) / stdB) }
+            if (isConstantB) tailB.map { ScalarPoint(it.timeMs, 0f) }
+            else tailB.map { ScalarPoint(it.timeMs, (it.value - meanB) / stdB) }
         } else {
             tailB
         }
 
+        // Return unavailable for constant / flat signals (undefined correlation)
+        if (isConstantA || isConstantB) {
+            return ComparatorResult(
+                alignedA = alignedA,
+                alignedB = alignedB,
+                pearsonR = 0f,
+                optimalLagMs = 0f,
+                peakCrossCorrelation = 0f,
+                estimatedPhaseDeg = null
+            )
+        }
+
         // Cross-correlation over lags [-maxLag, +maxLag]
+        // Positive lag k > 0 means B is delayed relative to A (B lags A).
+        // Negative lag k < 0 means B leads A.
         val maxLag = minOf(n / 3, 64).coerceAtLeast(1)
         val dtMs = 1000f / odrHz.coerceAtLeast(1f)
-        var bestLag = 0
-        var bestCorr = -2f
+        val numLags = 2 * maxLag + 1
+        val corr = FloatArray(numLags)
 
         for (lag in -maxLag..maxLag) {
-            var sum = 0.0
+            val idx = lag + maxLag
+            var sumProd = 0.0
+            var sumSqA = 0.0
+            var sumSqB = 0.0
+            var sumA = 0.0
+            var sumB = 0.0
             var count = 0
-            for (i in 0 until n) {
+
+            val startI = if (lag < 0) -lag else 0
+            val endI = if (lag > 0) n - lag else n
+
+            for (i in startI until endI) {
                 val j = i + lag
-                if (j in 0 until n) {
-                    val da = (tailA[i].value - meanA) / stdA
-                    val db = (tailB[j].value - meanB) / stdB
-                    sum += da * db
-                    count++
-                }
+                val va = tailA[i].value.toDouble()
+                val vb = tailB[j].value.toDouble()
+                sumA += va
+                sumB += vb
+                sumSqA += va * va
+                sumSqB += vb * vb
+                sumProd += va * vb
+                count++
             }
-            if (count > 0) {
-                val c = (sum / count).toFloat()
-                if (abs(c) > abs(bestCorr)) {
-                    bestCorr = c
-                    bestLag = lag
-                }
+
+            if (count >= 4) {
+                val meanOverlapA = sumA / count
+                val meanOverlapB = sumB / count
+                val varOverlapA = (sumSqA / count) - (meanOverlapA * meanOverlapA)
+                val varOverlapB = (sumSqB / count) - (meanOverlapB * meanOverlapB)
+                val covOverlap = (sumProd / count) - (meanOverlapA * meanOverlapB)
+
+                val denomOverlap = sqrt(maxOf(0.0, varOverlapA) * maxOf(0.0, varOverlapB))
+                corr[idx] = if (denomOverlap > 1e-9) {
+                    (covOverlap / denomOverlap).toFloat().coerceIn(-1f, 1f)
+                } else 0f
+            } else {
+                corr[idx] = 0f
             }
+        }
+
+        fun isLocalMax(idx: Int): Boolean {
+            val left = if (idx > 0) corr[idx - 1] else Float.NEGATIVE_INFINITY
+            val right = if (idx < numLags - 1) corr[idx + 1] else Float.NEGATIVE_INFINITY
+            return corr[idx] >= left && corr[idx] >= right
+        }
+
+        fun isLocalMin(idx: Int): Boolean {
+            val left = if (idx > 0) corr[idx - 1] else Float.POSITIVE_INFINITY
+            val right = if (idx < numLags - 1) corr[idx + 1] else Float.POSITIVE_INFINITY
+            return corr[idx] <= left && corr[idx] <= right
+        }
+
+        // Positive local peaks
+        val posPeakIndices = ArrayList<Int>()
+        for (i in 0 until numLags) {
+            if (isLocalMax(i) && corr[i] > 0f) {
+                posPeakIndices.add(i)
+            }
+        }
+        val globalMaxIdx = posPeakIndices.maxByOrNull { corr[it] } ?: (corr.indices.maxByOrNull { corr[it] } ?: maxLag)
+        val globalMaxVal = corr[globalMaxIdx]
+        val candidatePosIndices = posPeakIndices.filter { corr[it] >= globalMaxVal - 0.05f }
+
+        // Eliminate intra-crest ripples: keep only the highest point of each distinct lobe
+        val distinctPosLobes = ArrayList<Int>()
+        for (idx in candidatePosIndices) {
+            val existingSameLobeIdx = distinctPosLobes.indexOfFirst { other ->
+                val start = minOf(idx, other)
+                val end = maxOf(idx, other)
+                var minVal = Float.POSITIVE_INFINITY
+                for (k in start..end) {
+                    if (corr[k] < minVal) minVal = corr[k]
+                }
+                minVal > minOf(corr[idx], corr[other]) - 0.15f
+            }
+            if (existingSameLobeIdx >= 0) {
+                val other = distinctPosLobes[existingSameLobeIdx]
+                if (corr[idx] > corr[other]) {
+                    distinctPosLobes[existingSameLobeIdx] = idx
+                }
+            } else {
+                distinctPosLobes.add(idx)
+            }
+        }
+
+        // Pick distinct lobe closest to zero lag (stated ambiguity convention for periodic signals)
+        val bestPosIdx = distinctPosLobes.minWithOrNull(
+            compareBy<Int> { abs(it - maxLag) }
+                .thenByDescending { corr[it] }
+                .thenByDescending { it - maxLag }
+        ) ?: globalMaxIdx
+        val bestPosLag = bestPosIdx - maxLag
+        val maxPosCorr = corr[bestPosIdx]
+
+        // Negative local peaks (for inverted waveforms)
+        val negPeakIndices = ArrayList<Int>()
+        for (i in 0 until numLags) {
+            if (isLocalMin(i) && corr[i] < 0f) {
+                negPeakIndices.add(i)
+            }
+        }
+        val globalMinIdx = negPeakIndices.minByOrNull { corr[it] } ?: (corr.indices.minByOrNull { corr[it] } ?: maxLag)
+        val globalMinVal = corr[globalMinIdx]
+        val candidateNegIndices = negPeakIndices.filter { corr[it] <= globalMinVal + 0.05f }
+
+        val distinctNegLobes = ArrayList<Int>()
+        for (idx in candidateNegIndices) {
+            val existingSameLobeIdx = distinctNegLobes.indexOfFirst { other ->
+                val start = minOf(idx, other)
+                val end = maxOf(idx, other)
+                var maxVal = Float.NEGATIVE_INFINITY
+                for (k in start..end) {
+                    if (corr[k] > maxVal) maxVal = corr[k]
+                }
+                maxVal < maxOf(corr[idx], corr[other]) + 0.15f
+            }
+            if (existingSameLobeIdx >= 0) {
+                val other = distinctNegLobes[existingSameLobeIdx]
+                if (corr[idx] < corr[other]) {
+                    distinctNegLobes[existingSameLobeIdx] = idx
+                }
+            } else {
+                distinctNegLobes.add(idx)
+            }
+        }
+
+        val bestNegIdx = distinctNegLobes.minWithOrNull(
+            compareBy<Int> { abs(it - maxLag) }
+                .thenBy { corr[it] }
+                .thenByDescending { it - maxLag }
+        ) ?: globalMinIdx
+        val bestNegLag = bestNegIdx - maxLag
+        val minNegCorr = corr[bestNegIdx]
+
+        // Positive-similarity versus inverted anti-phase search:
+        // For physical signal alignment, positive in-phase similarity is preferred when present.
+        // If the signal is inverted (maxPosCorr < 0.25 and minNegCorr <= -0.25), report the dominant
+        // anti-phase peak while preserving its signed negative polarity.
+        val (bestLag, bestCorr) = when {
+            maxPosCorr >= 0.25f -> bestPosLag to maxPosCorr
+            minNegCorr <= -0.25f -> bestNegLag to minNegCorr
+            abs(maxPosCorr) >= abs(minNegCorr) && maxPosCorr > -1.5f -> bestPosLag to maxPosCorr
+            minNegCorr < 1.5f -> bestNegLag to minNegCorr
+            else -> 0 to 0f
         }
 
         val optimalLagMs = bestLag * dtMs
 
-        // Estimate dominant period of A to express lag in degrees of phase shift
+        // Estimate dominant period to report phase shift only for a justified common periodic component
         val autoA = computeAutocorrelation(tailA, odrHz, maxLagSamples = minOf(128, n / 2))
-        val phaseDeg = autoA.detectedPeriodSec?.let { periodSec ->
-            val periodMs = periodSec * 1000f
-            if (periodMs > 1f) {
-                ((optimalLagMs / periodMs) * 360f) % 360f
+        val phaseDeg = if (autoA.periodicityConfidence >= 0.35f && autoA.detectedPeriodSec != null) {
+            val autoB = computeAutocorrelation(tailB, odrHz, maxLagSamples = minOf(128, n / 2))
+            val periodA = autoA.detectedPeriodSec
+            val periodB = autoB.detectedPeriodSec
+            val commonPeriod = if (periodB != null && autoB.periodicityConfidence >= 0.30f &&
+                abs(periodA - periodB) / periodA <= 0.15f
+            ) {
+                (periodA + periodB) / 2f
+            } else if (abs(bestCorr) >= 0.70f) {
+                periodA
             } else null
-        }
+
+            commonPeriod?.let { pSec ->
+                val periodMs = pSec * 1000f
+                if (periodMs > 1f) {
+                    val rawPhase = ((optimalLagMs / periodMs) * 360f) % 360f
+                    when {
+                        rawPhase > 180f -> rawPhase - 360f
+                        rawPhase < -180f -> rawPhase + 360f
+                        else -> rawPhase
+                    }
+                } else null
+            }
+        } else null
 
         return ComparatorResult(
             alignedA = alignedA,
             alignedB = alignedB,
             pearsonR = pearsonR,
             optimalLagMs = optimalLagMs,
-            peakCrossCorrelation = bestCorr.coerceIn(-1f, 1f),
+            peakCrossCorrelation = bestCorr,
             estimatedPhaseDeg = phaseDeg
         )
     }

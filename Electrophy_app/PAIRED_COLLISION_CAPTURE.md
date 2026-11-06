@@ -40,11 +40,15 @@ After zooming below one second, Resume restores the three-second live window.
 
 ## Interruption protection
 
-A gap, reordered sample, invalid frame, disconnect, configuration change, or stale
-stream interrupts the unfinished pair and cancels delayed callbacks. Pausing after
-an interruption cannot turn it into a valid paired snapshot. Known old queued
-segments cannot populate a resumed interval. Expired threshold crossings are
-forgotten instead of matching a later collision.
+Inconsistent timing frames (duplicate, backwards, or reordered samples), invalid frames,
+or actual Bluetooth disconnects interrupt an unfinished pair and cancel delayed callbacks.
+Following user testing at 7,680 Hz (commit `e5858c3`), in-segment missing samples/gaps do
+not stop the live plot or interrupt the paired run; gap metrics are recorded in diagnostics,
+while the plot stays live and armed. Segment restarts (e.g. from configuration changes or
+FIFO flushes) and brief delivery stalls re-arm baseline/armed capture state without
+disconnecting. Pausing after an interruption cannot turn it into a valid paired snapshot.
+Known old queued segments cannot populate a resumed interval. Expired threshold crossings
+are forgotten instead of matching a later collision.
 
 An interruption shows a brief reason with Resume as the recovery action. No raw
 protocol/timing debug footer is shown. The latest frozen pair remains in memory;
@@ -74,14 +78,16 @@ No firmware or packet-format change is needed.
 
 ## Bluetooth write failure handling
 
-CCCD subscription and command writes share one callback-completed gate per device.
-The app reports Connected only after subscription succeeds. It never advances the
-command queue just because 250 ms elapsed, and never retries a refused write every
-60 ms. An accepted write gets up to ten seconds for its completion callback; a
-failed, refused, or missing completion stops that connection once and displays a
-manual reconnect message. A reconnect establishes a new callback/queue owner.
-This prevents issuing additional writes against an ATT client still busy with a
-previous operation. It does not guarantee that the radio/phone cannot disconnect.
+CCCD subscription and command writes share one callback-completed gate per device,
+and configuration writes between the two devices are serialized. The app reports
+Connected only after subscription succeeds. It never advances the command queue
+just because 250 ms elapsed. When Android synchronously refuses a command write
+start (returning false before accepting the write), `GattWriteGate` permits up to
+three controlled retries before failing the session. Once accepted by the stack, a write
+is never retried without completion, and gets up to ten seconds for its callback;
+a failed or missing completion stops that connection once and displays a manual
+reconnect message. A reconnect establishes a new callback/queue owner. This prevents
+issuing overlapping writes or bombarding an ATT client while Android is busy.
 
 Entering Newton mode no longer adds an extra automatic pause/resume cycle to the
 preset configuration. Explicit Pause/Resume remains unchanged. Logcat's

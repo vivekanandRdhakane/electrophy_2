@@ -1,6 +1,6 @@
 # Electrophy app audit and indexed implementation plan
 
-Latest verification (6 November 2026): all 82 Android JVM tests passed and the debug APK was built. After installing the Bluetooth write-queue fix, the user reported that the repeated connection issue appears resolved. This is a successful device retest of the reported regression; broader E010 qualification remains incomplete.
+Latest verification (6 November 2026): all 98 Android JVM tests passed and the debug APK was built. Following commit e5858c3 ("Keep paired Newton plot live across sample gaps"), the user verified on a Pixel 10 that 7,680 Hz dual-device streaming remains connected and responsive across packet gaps without pausing or disconnects. E003 remains partial (timing accuracy/drift and combined-mode acquisition timing remain open). Task E006 ("Repair comparator lag/correlation") completed with 8 acceptance tests in ComparatorTest.kt.
 
 Reviewed: **11 October 2026**. Source baseline: repository commit `3262790` plus the files present during review. This is an audit and implementation specification, not a claim that the tasks below have been implemented.
 
@@ -72,7 +72,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E003 |  | P0 | Timing | Acquisition timestamps and explicit gaps | Very high | Astra / Medium | Pro / High |
 | E004 |  | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
 | E005 | ✅ | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
-| E006 |  | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
+| E006 | ✅ | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
 | E007 |  | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
 | E008 |  | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
 | E009 |  | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
@@ -193,7 +193,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E003 — Acquisition timestamps and explicit gaps
 
-**Status:** [ ] Partial — v2 single-sensor FIFO timeline, counters, segments, gap handling, and overhead diagnostics implemented 5 November 2026. Hardware timing/rate qualification and combined-mode acquisition timing remain open; see the E003 log and `esp_sensor/TIMING_PROTOCOL.md`. **Scope:** app + firmware protocol. **Dependencies:** coordinate E002/E004/E007; required by quantitative analysis.
+**Status:** [ ] Partial — v2 single-sensor FIFO timeline, counters, segments, gap handling, and overhead diagnostics implemented 5 November 2026. In-segment sample gaps are explicitly counted in diagnostics while keeping live plots and paired capture running across loss (commit `e5858c3`). Hardware timing/rate qualification and combined-mode acquisition timing remain open; see the E003 log and `esp_sensor/TIMING_PROTOCOL.md`. **Scope:** app + firmware protocol. **Dependencies:** coordinate E002/E004/E007; required by quantitative analysis.
 
 **Evidence:** FW:127–137 has no acquisition timestamps or sample counters. MAIN:949–953 spreads samples between phone wall-clock notification times and invents +20 ms when callbacks coalesce. MAIN:908 reads but ignores sequence. MAIN:1145–1155 independently uses receipt timing for attitude. Reconnect resets the time origin without clearing chart data; resume spreads a batch across the pause.
 
@@ -225,7 +225,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E006 — Repair comparator lag/correlation
 
-**Status:** [ ] TODO. **Scope:** math engine/results. **Dependencies:** local algebra fix independent; final cross-sensor correctness needs E012.
+**Status:** [x] Complete. **Scope:** math engine/results. **Dependencies:** local algebra fix independent; final cross-sensor correctness needs E012.
 
 **Evidence:** MATH:753–797 initializes `bestCorr=-2`, then only updates when `abs(c)>abs(bestCorr)`. Normal inputs cannot satisfy this, so lag remains zero and the clamped peak becomes −1. Actual identical sine probe: Pearson=1, peak=−1. A 10 Hz sine delayed six samples at 240 Hz produces lag=0 instead of 25 ms.
 
@@ -694,6 +694,45 @@ Remaining limitations and follow-up task IDs:
 ### Log entries
 
 ```text
+Task: Newton 7,680 Hz paired live plot across gaps and GATT write serialization
+Date: 2026-11-06
+Commit: e5858c3
+Status: Device disconnect loop at 7,680 Hz resolved; E003 remains Partial
+Evidence:
+- User reported two devices repeatedly connected and disconnected in Newton's third law
+  at 7,680 Hz on a Pixel 10. Missing packet intervals interrupted the paired plot; a
+  subsequent pause GATT write timed out, prompting the app to disconnect the device.
+- User requested keeping 7,680 Hz as default and explicitly removing the requirement to
+  pause when samples are missing.
+Cause:
+- In-segment packet gaps triggered paired-capture interruption and UI freezes, followed
+  by automatic pause commands to both devices.
+- Concurrent configuration and pause commands to dual devices could collide in the Android
+  BLE stack, causing synchronous write refusals (started=false) or timeout disconnects.
+Changes:
+- Retain 7,680 Hz as default ODR.
+- In-segment missing samples (gaps) are counted in diagnostics (`timingGapSamples`, status)
+  and retain discontinuous device timestamps, but do NOT stop the live plot or interrupt
+  the paired run.
+- Segment restarts and brief delivery stalls re-arm baseline/armed state without disconnecting.
+- MainActivity: serializes configuration writes across devices (`_isConfiguring`), and gates
+  auto-trigger callbacks during configuration.
+- GattWriteGate: adds `retryRefusedCommand` and `retryReady`, allowing up to three immediate
+  retries when Android synchronously refuses a write start before failing the session.
+  Accepted writes continue to require single-flight callback completion.
+- PairedCollisionController & NewtonsThirdLawScreen: frozen peak bounds survive history resets;
+  continuous stream keeps flowing across missing packets.
+Verification:
+- Added CollisionChartDataTest, GattWriteGateTest, and PairedCollisionControllerTest fixtures.
+- All 90 Android JVM unit tests passed; debug APK built successfully.
+- Physical device retest on Pixel 10 by user: confirmed streaming and paired capture at
+  7,680 Hz no longer disconnects or stalls ("it is resolved now").
+Remaining limitations:
+- E003 remains partial: physical hardware qualification of timing accuracy, oscillator drift
+  over long captures, and combined-mode (BOTH_ACC / ALL) acquisition timing remain open.
+```
+
+```text
 Task: E010 stalled GATT command / retry storm follow-up
 Date: 2026-11-06
 Evidence:
@@ -1112,5 +1151,41 @@ Remaining limitations and follow-up task IDs:
 - E012 for signal alignment before math and actual time intervals in calculus.
 - E013 for physical force/impulse mass scaling in SI units.
 ```
+
+```
+Task: E006
+Date: 2026-11-06
+Status: Complete
+Files modified/created:
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MathEngine.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/ComparatorTest.kt
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Repaired signal comparator cross-correlation algorithm, optimal lag detection, and phase estimation in MathEngine.compareSignals.
+- Replaced defective initialization (`bestCorr = -2f` with `abs(c) > abs(bestCorr)` condition that prevented lag updates and forced peak = -1f).
+- Implemented exact overlap Pearson cross-correlation bounded within [-1.0, +1.0] across lag window [-maxLag, +maxLag].
+- Safe handling for constant/flat signals (`std < 1e-4`): cleanly returns 0 correlation, 0 lag, and null phase without NaN or exceptions.
+- Stated ambiguity convention for periodic signals: detects distinct periodic lobes (separated by a drop of >= 0.15), resolves intra-crest noise ripples, and selects the lobe with minimum absolute lag |lag| (in the principal period interval) to avoid multi-cycle alias ambiguity.
+- Preserves signed negative polarity for inverted anti-phase signals (reporting e.g. -1.0 peak correlation and positive delay sign in user language where positive lag means B lags A).
+- Gates estimated phase shift: only reports phase when dominant periodicity is justified by autocorrelation (confidence >= 0.35); non-periodic broadband signals return null phase.
+Regression tests and actual results:
+- ComparatorTest (8 tests, 100% pass via JUnit 4.13.2 / Kotlin 2.0.21):
+  * testIdenticalSignals_zeroLag_unitCorrelation: verified identical sines report Pearson = 1.0, peak = 1.0, lag = 0.0 ms, phase = 0.0°.
+  * testDelayedSineSignal_reproducesAuditProbe_reportsCorrectLagAndPhase: verified 10 Hz sine delayed by 6 samples at 240 Hz reports lag = 25.0 ms, peak = 1.0, phase = 90.0° (reproducing and resolving the audit probe).
+  * testLeadingSineSignal_reportsNegativeLagAndPhase: verified leading sine reports lag = -25.0 ms, phase = -90.0°.
+  * testInvertedDelayedSignal_preservesNegativePolarity: verified inverted broadband signal reports lag = 50.0 ms and signed peak = -1.0.
+  * testNonperiodicBroadbandSignal_delayed_noPhaseReported: verified nonperiodic broadband noise reports true lag (10.0 ms) and null phase.
+  * testConstantSignals_returnUnavailable: verified flat signals safely return 0 correlation, 0 lag, and null phase.
+  * testShortAndEmptyInput_handledSafely: verified inputs with n < 8 return empty aligned lists safely.
+  * testNoisySignals_identifiesTrueLag: verified 5 Hz sine with 10% additive noise resolves periodicity ambiguity to principal lag (+33.33 ms) with peak > 0.85.
+- Full Android test suite: 98 tests across 13 test suites, 100% pass.
+Android build result:
+- Gradle unit test runner passed (./gradlew.bat testDebugUnitTest).
+Hardware/UI verification performed (or explicitly not performed):
+- Explicitly not performed (algorithm and mathematical properties verified via comprehensive unit tests in ComparatorTest.kt).
+Remaining limitations and follow-up task IDs:
+- E012 for cross-sensor hardware time alignment and calibration.
+```
+
 
 
