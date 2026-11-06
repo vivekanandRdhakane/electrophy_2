@@ -122,5 +122,83 @@ object SensorConversion {
         val scale = getGyroScale(gyFs, packed12) ?: return null
         return rawCount.toFloat() * scale
     }
+
+    /**
+     * Maps a hardware Low-G full-scale code to its command/UI suffix string.
+     */
+    fun getLowGRangeSuffix(xlFs: Int): String? = when (xlFs) {
+        0 -> "2g"
+        1 -> "4g"
+        2 -> "8g"
+        3 -> "16g"
+        else -> null
+    }
+
+    /**
+     * Maps a hardware High-G full-scale code to its command/UI suffix string.
+     */
+    fun getHighGRangeSuffix(hgFs: Int): String? = when (hgFs) {
+        0 -> "32g"
+        1 -> "64g"
+        2 -> "128g"
+        3 -> "256g"
+        4 -> "320g"
+        else -> null
+    }
+
+    /**
+     * Maps a hardware Gyroscope full-scale code to its command/UI suffix string.
+     */
+    fun getGyroRangeSuffix(gyFs: Int): String? = when (gyFs) {
+        1 -> "250dps"
+        2 -> "500dps"
+        3 -> "1000dps"
+        4 -> "2000dps"
+        5 -> "4000dps"
+        else -> null
+    }
+
+    /**
+     * Reconstructs the nominal ODR suffix string from an acquisition period in nanoseconds.
+     */
+    fun parsePeriodNsToOdrSuffix(periodNs: Long): String? {
+        if (periodNs <= 0L) return null
+        val hz = 1_000_000_000.0 / periodNs
+        return when {
+            hz in 1.4..2.3 -> "1hz875"
+            hz in 6.0..9.0 -> "7hz5"
+            hz in 12.0..18.0 -> "15hz"
+            hz in 24.0..36.0 -> "30hz"
+            hz in 48.0..72.0 -> "60hz"
+            hz in 96.0..144.0 -> "120hz"
+            hz in 192.0..288.0 -> "240hz"
+            hz in 384.0..576.0 -> "480hz"
+            hz in 768.0..1152.0 -> "960hz"
+            hz in 1536.0..2304.0 -> "1920hz"
+            hz in 3072.0..4608.0 -> "3840hz"
+            hz in 6144.0..9216.0 -> "7680hz"
+            else -> null
+        }
+    }
+
+    /**
+     * Converts a rate suffix string (e.g. "1hz875", "120hz") to numeric Hz.
+     */
+    fun parseOdrSuffixToHz(suffix: String): Float = when (suffix.lowercase()) {
+        "off" -> 0f
+        "1hz875" -> 1.875f
+        "7hz5" -> 7.5f
+        "15hz" -> 15f
+        "30hz" -> 30f
+        "60hz" -> 60f
+        "120hz" -> 120f
+        "240hz" -> 240f
+        "480hz" -> 480f
+        "960hz" -> 960f
+        "1920hz" -> 1920f
+        "3840hz" -> 3840f
+        "7680hz" -> 7680f
+        else -> 0f
+    }
 }
 

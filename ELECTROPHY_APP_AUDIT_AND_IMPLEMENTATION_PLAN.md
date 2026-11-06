@@ -73,7 +73,7 @@ Model guidance checked **11 October 2026** for the stated **ChatGPT Plus and Goo
 | E004 |  | P0 | Acquisition | Fresh per-sensor samples and real synchronization | Very high | Astra / Medium | Pro / High |
 | E005 | ✅ | P1 | Math | Fix median-filter crash | Low | Luna / High | Flash / Medium |
 | E006 | ✅ | P1 | Math | Repair comparator lag/correlation | Medium | Sol / Medium | Pro / Medium |
-| E007 |  | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
+| E007 | ✅ | P1 | Configuration | Atomic applied configuration and valid ODR modes | High | Sol / High | Pro / High |
 | E008 | ✅ | P1 | Firmware | Propagate SPI/IMU errors | Medium | Sol / Medium | Pro / Medium |
 | E009 |  | P1 | Transport | Correct flow control and loss accounting | High | Sol / High | Pro / High |
 | E010 |  | P1 | Android | Reliable BLE lifecycle and operation completion | High | Sol / High | Pro / High |
@@ -235,7 +235,7 @@ To keep tasks economical for smaller models, use these aliases. All paths are re
 
 ### E007 — Atomic applied configuration and valid ODR modes
 
-**Status:** [ ] TODO. **Scope:** firmware + app applied-state UI. **Dependencies:** E008; coordinate E002–E004/E010.
+**Status:** [x] Complete. **Scope:** firmware + app applied-state UI. **Dependencies:** E008; coordinate E002–E004/E010.
 
 **Evidence:** FW:504–732 mutates hardware and shared batch state from the BLE callback while the sensor task uses them. A partly filled batch can be labeled with a newly selected scale at FW:865–869. The SPI mutex does not make a whole configuration transaction atomic. Driver returns are ignored. FW:545–547 requests 1.875 Hz with unchanged high-performance mode; ST:629–637 rejects that combination, but firmware claims it succeeded. MAIN:1318 resumes before sending the rest of the configuration.
 
@@ -1245,4 +1245,40 @@ Regression tests and build results:
 - ESP-IDF v6.1 firmware compiled cleanly and flashed to both devices on COM3 and COM5 with hash verification.
 Hardware verification:
 - Confirmed resolved on dual hardware devices by user.
+```
+
+```
+Task: E007
+Date: 2026-11-06
+Status: Complete
+Files modified/created:
+- esp_sensor/main/main.c
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/SensorConversion.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/AppliedConfiguration.kt
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- Electrophy_app/app/src/test/java/com/example/electrophy_app/AppliedConfigurationTest.kt
+- ELECTROPHY_APP_AUDIT_AND_IMPLEMENTATION_PLAN.md
+Behavior changed:
+- Firmware configuration transaction atomicity and batch protection:
+  * In `imu_chr_access_cb`, purged pending batches and in-flight TX queues (`imu_discard_pending()`) upon receiving any mode, range, or ODR configuration command while holding `spi_mutex`. This guarantees no partially filled batch from the prior configuration can be appended to or labeled with new metadata.
+  * Deferred `s_stream_generation` and monotonic `s_config_id` increment until driver configuration write succeeds (`cmd_rc == 0`).
+  * If a driver configuration call fails or an unknown command is received, firmware records `s_stats.spi_errors++`, leaves state variables unchanged, emits `CFG_ERR:<cmd>` notification, and returns `BLE_ATT_ERR_UNLIKELY` to the BLE central.
+  * On configuration success, formats `CFG_OK:<cmd> id=<id>` into `latest_ble_str` and notifies the connected central.
+  * Ensured range and ODR changes while paused do not restart streaming capture (`g_data_paused` is strictly preserved).
+- Valid ODR modes and 1.875 Hz operating mode transition:
+  * Implemented low-power mode transition for `odr_low_g_1hz875` using `LSM6DSV320X_XL_LOW_POWER_2_AVG_MD` per AN6119 Table 10 and ST driver restrictions.
+  * Configured `LSM6DSV320X_XL_HIGH_PERFORMANCE_MD` for all higher Low-G ODR rates (7.5 Hz to 7.68 kHz) and power-down.
+- Android applied vs desired configuration model:
+  * Introduced `AppliedConfiguration` data model capturing confirmed hardware mode, Low-G / High-G / Gyro full-scale ranges, ODRs, and configuration ID.
+  * Added `getLowGRangeSuffix`, `getHighGRangeSuffix`, `getGyroRangeSuffix`, and `parsePeriodNsToOdrSuffix` to `SensorConversion.kt`.
+  * Updated `MainActivity.kt` to update `appliedConfig` directly from verified binary packet headers (AA55 / AA58) and incoming `CFG_OK:` / `CFG_ERR:` responses.
+  * Exposed `isConfigurationPending` to distinguish desired UI selections from verified applied sensor hardware state.
+  * Reset `appliedConfig.isConfirmed` on Bluetooth disconnection.
+Regression tests and build results:
+- Android unit tests: 105 tests across 14 test suites, 100% pass (`./gradlew.bat testDebugUnitTest`), including 7 acceptance tests in `AppliedConfigurationTest.kt`.
+- Android debug APK assembled cleanly (`./gradlew.bat assembleDebug`).
+- ESP-IDF v6.1 firmware compiled with zero errors and flashed to both devices on COM3 and COM5 with hash verification.
+Remaining limitations and follow-up task IDs:
+- E004 for fresh per-sensor sample tagging and multi-sensor DRDY/FIFO synchronization.
+- E009 for BLE transport pacing and loss accounting.
 ```

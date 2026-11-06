@@ -214,6 +214,7 @@ static int64_t s_next_tx_retry_us;
 /* Host owns generation; sensor task alone owns batches and the retry queue. */
 static volatile uint32_t s_stream_generation;
 static uint32_t s_sensor_generation;
+static volatile uint32_t s_config_id = 1;
 static volatile bool s_diagnostics_enabled;
 static struct ble_npl_callout s_diagnostics_callout;
 static uint8_t s_diagnostics_snapshot[72];
@@ -710,11 +711,11 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         }
         if (!sensor_ready) return BLE_ATT_ERR_UNLIKELY;
         xSemaphoreTakeRecursive(spi_mutex, portMAX_DELAY);
-        s_stream_generation++;
         int32_t cmd_rc = 0;
 
         if (strcasecmp(cmd, "proto2") == 0) {
             s_timed_protocol = true;
+            imu_discard_pending();
         } else if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
             g_data_paused = true;
             imu_discard_pending();
@@ -727,177 +728,228 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 
         /* ── Stream-mode commands ──────────────────────────────────────── */
         } else if (strcasecmp(cmd, "low_acc") == 0 || strcasecmp(cmd, "only_acc") == 0 || strcasecmp(cmd, "low_g") == 0) {
+            imu_discard_pending();
             current_stream_mode = STREAM_MODE_LOW_ACC;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: LOW-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "high_acc") == 0 || strcasecmp(cmd, "high_g") == 0) {
+            imu_discard_pending();
             current_stream_mode = STREAM_MODE_HIGH_ACC;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: HIGH-G ACCELEROMETER ONLY");
         } else if (strcasecmp(cmd, "both_acc") == 0 || strcasecmp(cmd, "acc") == 0) {
+            imu_discard_pending();
             current_stream_mode = STREAM_MODE_BOTH_ACC;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: BOTH ACCELEROMETERS (LOW-G + HIGH-G)");
         } else if (strcasecmp(cmd, "only_gyro") == 0 || strcasecmp(cmd, "gyro") == 0) {
+            imu_discard_pending();
             current_stream_mode = STREAM_MODE_ONLY_GYRO;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: GYROSCOPE ONLY");
         } else if (strcasecmp(cmd, "all") == 0 || strcasecmp(cmd, "both") == 0) {
+            imu_discard_pending();
             current_stream_mode = STREAM_MODE_ALL;
             odr_recompute_timing();
             ESP_LOGI(TAG_BLE, "Switched stream mode: ALL (LOW-G + HIGH-G + GYRO)");
 
         /* ── Low-G accelerometer ODR commands (CTRL1 0x10) ────────────── */
-        /* odr_low_g_<rate>  — keeps current operating mode, changes ODR only */
+        /* Note: 1.875 Hz requires low-power mode per AN6119; other rates use high-performance mode */
         } else if (strcasecmp(cmd, "odr_low_g_off") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 0.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR: power-down"); }
         } else if (strcasecmp(cmd, "odr_low_g_1hz875") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1Hz875, LSM6DSV320X_XL_UNCHANGED_MD);
-            if (cmd_rc == 0) { g_xl_odr_hz = 1.875f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 1.875 Hz"); }
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1Hz875, LSM6DSV320X_XL_LOW_POWER_2_AVG_MD);
+            if (cmd_rc == 0) { g_xl_odr_hz = 1.875f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 1.875 Hz (Low-Power)"); }
         } else if (strcasecmp(cmd, "odr_low_g_7hz5") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 7.5f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 7.5 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_15hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 15.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 15 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_30hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 30.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 30 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_60hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 60.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 60 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_120hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 120.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 120 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_240hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 240.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 240 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_480hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 480.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 480 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_960hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 960.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 960 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_1920hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 1920.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 1920 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_3840hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 3840.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 3840 Hz"); }
         } else if (strcasecmp(cmd, "odr_low_g_7680hz") == 0) {
-            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_XL_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_xl_odr_hz = 7680.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Low-G ODR set to 7680 Hz"); }
 
         /* ── High-G accelerometer ODR commands (CTRL1_XL_HG 0x4E) ─────── */
         /* odr_high_g_<rate>  — keeps reg_out_en = 1 */
         } else if (strcasecmp(cmd, "odr_high_g_off") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_OFF, 0);
             if (cmd_rc == 0) { g_hg_odr_hz = 0.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR: power-down"); }
         } else if (strcasecmp(cmd, "odr_high_g_480hz") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_480Hz, 1);
             if (cmd_rc == 0) { g_hg_odr_hz = 480.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR set to 480 Hz"); }
         } else if (strcasecmp(cmd, "odr_high_g_960hz") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_960Hz, 1);
             if (cmd_rc == 0) { g_hg_odr_hz = 960.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR set to 960 Hz"); }
         } else if (strcasecmp(cmd, "odr_high_g_1920hz") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_1920Hz, 1);
             if (cmd_rc == 0) { g_hg_odr_hz = 1920.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR set to 1920 Hz"); }
         } else if (strcasecmp(cmd, "odr_high_g_3840hz") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_3840Hz, 1);
             if (cmd_rc == 0) { g_hg_odr_hz = 3840.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR set to 3840 Hz"); }
         } else if (strcasecmp(cmd, "odr_high_g_7680hz") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_7680Hz, 1);
             if (cmd_rc == 0) { g_hg_odr_hz = 7680.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "High-G ODR set to 7680 Hz"); }
 
         /* ── Gyroscope ODR commands (CTRL2 0x11) ───────────────────────── */
         /* odr_gyro_<rate>  — keeps current operating mode, changes ODR only */
         } else if (strcasecmp(cmd, "odr_gyro_off") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_OFF, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 0.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR: power-down"); }
         } else if (strcasecmp(cmd, "odr_gyro_7hz5") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7Hz5, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 7.5f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 7.5 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_15hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 15.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 15 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_30hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_30Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 30.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 30 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_60hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_60Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 60.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 60 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_120hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_120Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 120.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 120 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_240hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_240Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 240.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 240 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_480hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_480Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 480.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 480 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_960hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_960Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 960.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 960 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_1920hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1920Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 1920.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 1920 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_3840hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_3840Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 3840.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 3840 Hz"); }
         } else if (strcasecmp(cmd, "odr_gyro_7680hz") == 0) {
-            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_GY_UNCHANGED_MD);
+            imu_discard_pending();
+            cmd_rc = lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
             if (cmd_rc == 0) { g_gy_odr_hz = 7680.0f; odr_recompute_timing(); ESP_LOGI(TAG_BLE, "Gyro ODR set to 7680 Hz"); }
 
         /* ── Low-G accelerometer range commands (CTRL8 0x17) ──────────── */
         } else if (strcasecmp(cmd, "range_low_g_2g") == 0 || strcasecmp(cmd, "fs_low_g_2g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
             if (cmd_rc == 0) { g_xl_fs = LSM6DSV320X_2g; ESP_LOGI(TAG_BLE, "Low-G range set to ±2g"); }
         } else if (strcasecmp(cmd, "range_low_g_4g") == 0 || strcasecmp(cmd, "fs_low_g_4g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_4g);
             if (cmd_rc == 0) { g_xl_fs = LSM6DSV320X_4g; ESP_LOGI(TAG_BLE, "Low-G range set to ±4g"); }
         } else if (strcasecmp(cmd, "range_low_g_8g") == 0 || strcasecmp(cmd, "fs_low_g_8g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_8g);
             if (cmd_rc == 0) { g_xl_fs = LSM6DSV320X_8g; ESP_LOGI(TAG_BLE, "Low-G range set to ±8g"); }
         } else if (strcasecmp(cmd, "range_low_g_16g") == 0 || strcasecmp(cmd, "fs_low_g_16g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_16g);
             if (cmd_rc == 0) { g_xl_fs = LSM6DSV320X_16g; ESP_LOGI(TAG_BLE, "Low-G range set to ±16g"); }
 
         /* ── High-G accelerometer range commands (CTRL1_XL_HG 0x4E) ───── */
         } else if (strcasecmp(cmd, "range_high_g_32g") == 0 || strcasecmp(cmd, "fs_high_g_32g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_32g);
             if (cmd_rc == 0) { g_hg_fs = LSM6DSV320X_32g; ESP_LOGI(TAG_BLE, "High-G range set to ±32g"); }
         } else if (strcasecmp(cmd, "range_high_g_64g") == 0 || strcasecmp(cmd, "fs_high_g_64g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_64g);
             if (cmd_rc == 0) { g_hg_fs = LSM6DSV320X_64g; ESP_LOGI(TAG_BLE, "High-G range set to ±64g"); }
         } else if (strcasecmp(cmd, "range_high_g_128g") == 0 || strcasecmp(cmd, "fs_high_g_128g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_128g);
             if (cmd_rc == 0) { g_hg_fs = LSM6DSV320X_128g; ESP_LOGI(TAG_BLE, "High-G range set to ±128g"); }
         } else if (strcasecmp(cmd, "range_high_g_256g") == 0 || strcasecmp(cmd, "fs_high_g_256g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_256g);
             if (cmd_rc == 0) { g_hg_fs = LSM6DSV320X_256g; ESP_LOGI(TAG_BLE, "High-G range set to ±256g"); }
         } else if (strcasecmp(cmd, "range_high_g_320g") == 0 || strcasecmp(cmd, "fs_high_g_320g") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_320g);
             if (cmd_rc == 0) { g_hg_fs = LSM6DSV320X_320g; ESP_LOGI(TAG_BLE, "High-G range set to ±320g"); }
 
         /* ── Gyroscope range commands (CTRL6 0x15) ────────────────────── */
         } else if (strcasecmp(cmd, "range_gyro_250dps") == 0 || strcasecmp(cmd, "fs_gyro_250dps") == 0 || strcasecmp(cmd, "range_gyro_250") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_250dps);
             if (cmd_rc == 0) { g_gy_fs = LSM6DSV320X_250dps; ESP_LOGI(TAG_BLE, "Gyro range set to ±250 dps"); }
         } else if (strcasecmp(cmd, "range_gyro_500dps") == 0 || strcasecmp(cmd, "fs_gyro_500dps") == 0 || strcasecmp(cmd, "range_gyro_500") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_500dps);
             if (cmd_rc == 0) { g_gy_fs = LSM6DSV320X_500dps; ESP_LOGI(TAG_BLE, "Gyro range set to ±500 dps"); }
         } else if (strcasecmp(cmd, "range_gyro_1000dps") == 0 || strcasecmp(cmd, "fs_gyro_1000dps") == 0 || strcasecmp(cmd, "range_gyro_1000") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_1000dps);
             if (cmd_rc == 0) { g_gy_fs = LSM6DSV320X_1000dps; ESP_LOGI(TAG_BLE, "Gyro range set to ±1000 dps"); }
         } else if (strcasecmp(cmd, "range_gyro_2000dps") == 0 || strcasecmp(cmd, "fs_gyro_2000dps") == 0 || strcasecmp(cmd, "range_gyro_2000") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_2000dps);
             if (cmd_rc == 0) { g_gy_fs = LSM6DSV320X_2000dps; ESP_LOGI(TAG_BLE, "Gyro range set to ±2000 dps"); }
         } else if (strcasecmp(cmd, "range_gyro_4000dps") == 0 || strcasecmp(cmd, "fs_gyro_4000dps") == 0 || strcasecmp(cmd, "range_gyro_4000") == 0) {
+            imu_discard_pending();
             cmd_rc = lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_4000dps);
             if (cmd_rc == 0) { g_gy_fs = LSM6DSV320X_4000dps; ESP_LOGI(TAG_BLE, "Gyro range set to ±4000 dps"); }
 
         } else {
+            cmd_rc = -1;
             ESP_LOGW(TAG_BLE,
                      "Unknown command \"%s\".\n"
                      "  Control:      pause | resume (or stop | start)\n"
@@ -913,8 +965,20 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         if (cmd_rc != 0) {
             ESP_LOGE(TAG_BLE, "Hardware driver command \"%s\" failed with rc=%ld", cmd, (long)cmd_rc);
             s_stats.spi_errors++;
+            snprintf(latest_ble_str, sizeof(latest_ble_str), "CFG_ERR:%s rc=%ld\r\n", cmd, (long)cmd_rc);
+            if (ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+                struct os_mbuf *om = ble_hs_mbuf_from_flat(latest_ble_str, strlen(latest_ble_str));
+                if (om) ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
+            }
             xSemaphoreGiveRecursive(spi_mutex);
             return BLE_ATT_ERR_UNLIKELY;
+        }
+        s_config_id++;
+        s_stream_generation++;
+        snprintf(latest_ble_str, sizeof(latest_ble_str), "CFG_OK:%s id=%lu\r\n", cmd, (unsigned long)s_config_id);
+        if (ble_notify_enabled && ble_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(latest_ble_str, strlen(latest_ble_str));
+            if (om) ble_gatts_notify_custom(ble_conn_handle, imu_chr_val_handle, om);
         }
         xSemaphoreGiveRecursive(spi_mutex);
         return 0;

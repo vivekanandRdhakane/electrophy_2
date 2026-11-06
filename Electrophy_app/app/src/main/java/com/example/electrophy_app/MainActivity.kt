@@ -541,6 +541,21 @@ class BleViewModel : ViewModel() {
     private val _gyroRange = MutableStateFlow("2000dps")
     val gyroRange: StateFlow<String> = _gyroRange
 
+    private val _appliedConfig = MutableStateFlow(AppliedConfiguration())
+    val appliedConfig: StateFlow<AppliedConfiguration> = _appliedConfig
+
+    val isConfigurationPending: Boolean
+        get() = _connectionState.value == ConnectionState.Connected && (
+            !_appliedConfig.value.isConfirmed ||
+            _lowGRange.value != _appliedConfig.value.lowGRange ||
+            _highGRange.value != _appliedConfig.value.highGRange ||
+            _gyroRange.value != _appliedConfig.value.gyroRange ||
+            _lowGOdr.value != _appliedConfig.value.lowGOdr ||
+            _highGOdr.value != _appliedConfig.value.highGOdr ||
+            _gyroOdr.value != _appliedConfig.value.gyroOdr ||
+            _selectedMode.value != _appliedConfig.value.mode
+        )
+
     private val _timeWindowSec = MutableStateFlow(5f)
     val timeWindowSec: StateFlow<Float> = _timeWindowSec
 
@@ -882,6 +897,7 @@ class BleViewModel : ViewModel() {
                     _connectedDeviceName.value = null
                     _connectionState.value = ConnectionState.Disconnected
                     _isConfiguring.value = false
+                    _appliedConfig.value = AppliedConfiguration(isConfirmed = false)
                     _isPaused.value = false
                     _receivedSamplesPerSecond.value = 0
                     _lastActiveSamplesPerSecond.value = 0
@@ -1042,7 +1058,43 @@ class BleViewModel : ViewModel() {
             processBinaryPacket(value)
         } else {
             val data = String(value, Charsets.UTF_8)
+            handleIncomingConfigAck(data)
             appendLog(data)
+        }
+    }
+
+    private fun handleIncomingConfigAck(data: String) {
+        val trimmed = data.trim()
+        if (trimmed.startsWith("CFG_OK:")) {
+            val payload = trimmed.substringAfter("CFG_OK:").trim()
+            val cmd = payload.substringBefore(" ").trim()
+            val idStr = if (payload.contains("id=")) payload.substringAfter("id=").trim().toLongOrNull() else null
+            _appliedConfig.update { cur ->
+                var next = cur.copy(isConfirmed = true, lastError = null)
+                if (idStr != null) next = next.copy(configId = idStr)
+                when {
+                    cmd.startsWith("range_low_g_") -> next.copy(lowGRange = cmd.removePrefix("range_low_g_"))
+                    cmd.startsWith("fs_low_g_") -> next.copy(lowGRange = cmd.removePrefix("fs_low_g_"))
+                    cmd.startsWith("range_high_g_") -> next.copy(highGRange = cmd.removePrefix("range_high_g_"))
+                    cmd.startsWith("fs_high_g_") -> next.copy(highGRange = cmd.removePrefix("fs_high_g_"))
+                    cmd.startsWith("range_gyro_") -> next.copy(gyroRange = cmd.removePrefix("range_gyro_"))
+                    cmd.startsWith("fs_gyro_") -> next.copy(gyroRange = cmd.removePrefix("fs_gyro_"))
+                    cmd.startsWith("odr_low_g_") -> next.copy(lowGOdr = cmd.removePrefix("odr_low_g_"))
+                    cmd.startsWith("odr_high_g_") -> next.copy(highGOdr = cmd.removePrefix("odr_high_g_"))
+                    cmd.startsWith("odr_gyro_") -> next.copy(gyroOdr = cmd.removePrefix("odr_gyro_"))
+                    cmd in listOf("low_acc", "only_acc", "low_g") -> next.copy(mode = GraphMode.LOW_G)
+                    cmd in listOf("high_acc", "high_g") -> next.copy(mode = GraphMode.HIGH_G)
+                    cmd in listOf("both_acc", "acc") -> next.copy(mode = GraphMode.BOTH_ACC)
+                    cmd in listOf("only_gyro", "gyro") -> next.copy(mode = GraphMode.GYRO)
+                    cmd in listOf("all", "both") -> next.copy(mode = GraphMode.ALL)
+                    else -> next
+                }
+            }
+            Log.i(BLE_TAG, "Hardware configuration ACK: $payload")
+        } else if (trimmed.startsWith("CFG_ERR:")) {
+            val errPayload = trimmed.substringAfter("CFG_ERR:").trim()
+            _appliedConfig.update { it.copy(lastError = "Rejected by device: $errPayload") }
+            Log.e(BLE_TAG, "Hardware configuration ERROR: $errPayload")
         }
     }
 
@@ -1055,6 +1107,35 @@ class BleViewModel : ViewModel() {
                 Log.w(BLE_TAG, "processBinaryPacket: dropped invalid frame: ${res.reason}")
                 return
             }
+        }
+
+        // Keep applied configuration strictly in sync with the hardware header in the packet
+        val appliedLowG = SensorConversion.getLowGRangeSuffix(decoded.xlFs) ?: _appliedConfig.value.lowGRange
+        val appliedHighG = SensorConversion.getHighGRangeSuffix(decoded.hgFs) ?: _appliedConfig.value.highGRange
+        val appliedGyro = SensorConversion.getGyroRangeSuffix(decoded.gyFs) ?: _appliedConfig.value.gyroRange
+        val appliedMode = when (decoded.mode) {
+            PacketDecoder.MODE_LOW_ACC -> GraphMode.LOW_G
+            PacketDecoder.MODE_HIGH_ACC -> GraphMode.HIGH_G
+            PacketDecoder.MODE_BOTH_ACC -> GraphMode.BOTH_ACC
+            PacketDecoder.MODE_ONLY_GYRO -> GraphMode.GYRO
+            PacketDecoder.MODE_ALL -> GraphMode.ALL
+            else -> _appliedConfig.value.mode
+        }
+        val appliedOdr = decoded.timing?.let { SensorConversion.parsePeriodNsToOdrSuffix(it.periodNs) }
+        val cfgId = decoded.timing?.segmentId ?: _appliedConfig.value.configId
+        _appliedConfig.update { cur ->
+            cur.copy(
+                mode = appliedMode,
+                lowGRange = appliedLowG,
+                highGRange = appliedHighG,
+                gyroRange = appliedGyro,
+                lowGOdr = if (appliedMode == GraphMode.LOW_G && appliedOdr != null) appliedOdr else cur.lowGOdr,
+                highGOdr = if (appliedMode == GraphMode.HIGH_G && appliedOdr != null) appliedOdr else cur.highGOdr,
+                gyroOdr = if (appliedMode == GraphMode.GYRO && appliedOdr != null) appliedOdr else cur.gyroOdr,
+                configId = cfgId,
+                isConfirmed = true,
+                lastError = null
+            )
         }
 
         val protocol = if (decoded.timing == null) 1 else 2
@@ -1451,6 +1532,7 @@ class BleViewModel : ViewModel() {
         _batteryStatus.value = null
         _connectionState.value = ConnectionState.Disconnected
         _isConfiguring.value = false
+        _appliedConfig.value = AppliedConfiguration(isConfirmed = false)
         _receivedSamplesPerSecond.value = 0
         _lastActiveSamplesPerSecond.value = 0
         _firmwareDiagnostics.value = null
