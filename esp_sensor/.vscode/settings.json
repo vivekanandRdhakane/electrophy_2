@@ -33,6 +33,6 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=e:\\electrophy\\code\\electrophy_2\\esp_sensor\\build"
+    "--compile-commands-dir=e:\\Electrophy\\code\\electrophy_2\\esp_sensor\\build"
   ]
 }
