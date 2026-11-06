@@ -7,12 +7,12 @@ package com.example.electrophy_app
  */
 object RawDataDefaults {
     val mode: GraphMode = GraphMode.LOW_G
-    const val lowGRange: String = "2g"
+    const val lowGRange: String = "16g"
     const val highGRange: String = "320g"
-    const val gyroRange: String = "2000dps"
-    const val lowGOdr: String = "15hz"
-    const val highGOdr: String = "480hz"
-    const val gyroOdr: String = "15hz"
+    const val gyroRange: String = "4000dps"
+    const val lowGOdr: String = "7680hz"
+    const val highGOdr: String = "7680hz"
+    const val gyroOdr: String = "7680hz"
     const val timeWindowSec: Float = 5f
     const val isFilterEnabled: Boolean = false
     const val filterAlpha: Float = 0.2f

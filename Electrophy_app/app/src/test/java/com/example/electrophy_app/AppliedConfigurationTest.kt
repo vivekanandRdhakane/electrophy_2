@@ -115,12 +115,12 @@ class AppliedConfigurationTest {
     @Test
     fun rawDataDefaults_matchesStandardAppStartupConfiguration() {
         assertEquals(GraphMode.LOW_G, RawDataDefaults.mode)
-        assertEquals("2g", RawDataDefaults.lowGRange)
+        assertEquals("16g", RawDataDefaults.lowGRange)
         assertEquals("320g", RawDataDefaults.highGRange)
-        assertEquals("2000dps", RawDataDefaults.gyroRange)
-        assertEquals("15hz", RawDataDefaults.lowGOdr)
-        assertEquals("480hz", RawDataDefaults.highGOdr)
-        assertEquals("15hz", RawDataDefaults.gyroOdr)
+        assertEquals("4000dps", RawDataDefaults.gyroRange)
+        assertEquals("7680hz", RawDataDefaults.lowGOdr)
+        assertEquals("7680hz", RawDataDefaults.highGOdr)
+        assertEquals("7680hz", RawDataDefaults.gyroOdr)
         assertEquals(5f, RawDataDefaults.timeWindowSec, 1e-4f)
         assertFalse(RawDataDefaults.isFilterEnabled)
         assertEquals(0.2f, RawDataDefaults.filterAlpha, 1e-4f)
@@ -142,6 +142,13 @@ class AppliedConfigurationTest {
         assertEquals(RawDataDefaults.lowGOdr, defaultApplied.lowGOdr)
         assertEquals(RawDataDefaults.highGOdr, defaultApplied.highGOdr)
         assertEquals(RawDataDefaults.gyroOdr, defaultApplied.gyroOdr)
+    }
+
+    @Test
+    fun newtonsThirdLaw_usesHighestRangeAndOdr() {
+        val newtonMode = experimentModes.first { it.id == "newtons_third_law" }
+        assertEquals("7680hz", newtonMode.highGOdr)
+        assertEquals("320g", newtonMode.highGRange)
     }
 }
 

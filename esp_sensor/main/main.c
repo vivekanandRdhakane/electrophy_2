@@ -275,14 +275,14 @@ static void imu_drain_tx(void);
  * Initialised to match the startup configuration below. */
 static int8_t s_freq_fine;
 static bool s_freq_fine_valid;
-static volatile float g_xl_odr_hz  = 15.0f;   /* Low-G  accel  — CTRL1  */
-static volatile float g_gy_odr_hz  = 15.0f;   /* Gyro          — CTRL2  */
-static volatile float g_hg_odr_hz  = 480.0f;  /* High-G accel  — CTRL1_XL_HG */
+static volatile float g_xl_odr_hz  = 7680.0f;  /* Low-G  accel  — CTRL1  */
+static volatile float g_gy_odr_hz  = 7680.0f;  /* Gyro          — CTRL2  */
+static volatile float g_hg_odr_hz  = 7680.0f;  /* High-G accel  — CTRL1_XL_HG */
 
 /* ── Dynamic Full-Scale (Range) tracking ──────────────────────────────────── */
-static volatile lsm6dsv320x_xl_full_scale_t    g_xl_fs = LSM6DSV320X_2g;
+static volatile lsm6dsv320x_xl_full_scale_t    g_xl_fs = LSM6DSV320X_16g;
 static volatile lsm6dsv320x_hg_xl_full_scale_t g_hg_fs = LSM6DSV320X_320g;
-static volatile lsm6dsv320x_gy_full_scale_t    g_gy_fs = LSM6DSV320X_2000dps;
+static volatile lsm6dsv320x_gy_full_scale_t    g_gy_fs = LSM6DSV320X_4000dps;
 
 static inline float convert_xl_to_mg(int16_t lsb, lsm6dsv320x_xl_full_scale_t fs)
 {
@@ -1867,17 +1867,17 @@ static void sensor_task(void *arg)
     /* Set Pulsed mode on DRDY pin so it pulses instead of latching indefinitely */
     init_rc |= lsm6dsv320x_data_ready_mode_set(&dev_ctx, LSM6DSV320X_DRDY_PULSED);
 
-    /* 1. Low-G Accelerometer: 15 Hz, High-Performance, ±2g */
-    init_rc |= lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
-    init_rc |= lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_2g);
+    /* 1. Low-G Accelerometer: 7680 Hz, High-Performance, ±16g */
+    init_rc |= lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_XL_HIGH_PERFORMANCE_MD);
+    init_rc |= lsm6dsv320x_xl_full_scale_set(&dev_ctx, LSM6DSV320X_16g);
 
-    /* 2. Gyroscope: 15 Hz, High-Performance, ±2000dps */
-    init_rc |= lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_15Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
-    init_rc |= lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_2000dps);
+    /* 2. Gyroscope: 7680 Hz, High-Performance, ±4000dps */
+    init_rc |= lsm6dsv320x_gy_setup(&dev_ctx, LSM6DSV320X_ODR_AT_7680Hz, LSM6DSV320X_GY_HIGH_PERFORMANCE_MD);
+    init_rc |= lsm6dsv320x_gy_full_scale_set(&dev_ctx, LSM6DSV320X_4000dps);
 
-    /* 3. High-G Accelerometer: 480 Hz ODR, enable output registers, ±320g */
+    /* 3. High-G Accelerometer: 7680 Hz ODR, enable output registers, ±320g */
     init_rc |= lsm6dsv320x_hg_xl_full_scale_set(&dev_ctx, LSM6DSV320X_320g);
-    init_rc |= lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_480Hz, 1);
+    init_rc |= lsm6dsv320x_hg_xl_data_rate_set(&dev_ctx, LSM6DSV320X_HG_XL_ODR_AT_7680Hz, 1);
 
     if (init_rc != 0) {
         ESP_LOGE(TAG, "Sensor configuration failed (rc=%ld)! Sensor marked NOT READY.", (long)init_rc);
