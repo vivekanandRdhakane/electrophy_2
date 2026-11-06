@@ -717,6 +717,7 @@ static int imu_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
             s_timed_protocol = true;
         } else if (strcasecmp(cmd, "pause") == 0 || strcasecmp(cmd, "stop") == 0) {
             g_data_paused = true;
+            imu_discard_pending();
             status_led_update_streaming();
             ESP_LOGI(TAG_BLE, "Data reading and sending PAUSED");
         } else if (strcasecmp(cmd, "resume") == 0 || strcasecmp(cmd, "start") == 0 || strcasecmp(cmd, "play") == 0) {
@@ -2011,14 +2012,14 @@ static void status_led_update_streaming(void)
     xSemaphoreTake(status_led_mutex, portMAX_DELAY);
     if (streaming != status_led_streaming) {
         status_led_streaming = streaming;
+        esp_timer_stop(led_timer);
         if (streaming) {
-            ESP_ERROR_CHECK(esp_timer_stop(led_timer));
             /* 100% duty at 12-bit resolution: inverted output stays LOW. */
-            ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 4096));
-            ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 4096);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
         } else {
             status_led_start_us = esp_timer_get_time();
-            ESP_ERROR_CHECK(esp_timer_start_periodic(led_timer, 10000));
+            esp_timer_start_periodic(led_timer, 10000);
         }
     }
     xSemaphoreGive(status_led_mutex);
@@ -2041,8 +2042,8 @@ static void status_led_tick(void *arg)
     const float brightness = 0.5f - 0.5f * cosf(6.28318530718f * phase);
     const uint32_t duty = (uint32_t)(4095.0f * brightness * brightness + 0.5f);
     /* Serialize duty writes with BLE state changes. */
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
     xSemaphoreGive(status_led_mutex);
 }
 

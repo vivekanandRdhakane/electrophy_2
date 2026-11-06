@@ -1226,3 +1226,23 @@ Remaining limitations and follow-up task IDs:
 
 
 
+
+```
+Task: BLE Command Write Reliability and Pause Timeout Fix
+Date: 2026-11-06
+Status: Complete (Hardware Verified on Dual Devices)
+Files modified:
+- Electrophy_app/app/src/main/java/com/example/electrophy_app/MainActivity.kt
+- esp_sensor/main/main.c
+Behavior changed:
+- Switched BLE GATT characteristic write type in `processNextCommand()` to `BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE` when `PROPERTY_WRITE_NO_RESPONSE` is available on the RX characteristic. This matches the Nordic UART Service specification and eliminates ATT Write Response (`ATT_WRITE_RSP`) waiting over saturated high-rate streaming links.
+- Eliminated spurious 10-second `gattWriteTimeoutRunnable` triggers that were reporting "Bluetooth timed out during pause. Reconnect the device." and disconnecting the peripheral.
+- In firmware `esp_sensor/main/main.c`, `imu_chr_access_cb` now calls `imu_discard_pending()` immediately upon receiving "pause" or "stop", cleanly purging `s_tx_queue` and halting outgoing notifications without delay.
+- Made `status_led_update_streaming()` and `status_led_tick()` timer stop/start calls non-fatal, preventing `ESP_ERR_INVALID_STATE` panics during rapid state transitions.
+Regression tests and build results:
+- Android unit tests: 98 tests across 13 test suites, 100% pass (`./gradlew.bat testDebugUnitTest`).
+- Android debug APK assembled cleanly (`./gradlew.bat assembleDebug`).
+- ESP-IDF v6.1 firmware compiled cleanly and flashed to both devices on COM3 and COM5 with hash verification.
+Hardware verification:
+- Confirmed resolved on dual hardware devices by user.
+```

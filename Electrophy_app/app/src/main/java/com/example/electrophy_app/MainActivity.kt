@@ -1772,13 +1772,19 @@ class BleViewModel : ViewModel() {
         if (!gattWrites.begin(GattWriteGate.Kind.COMMAND, nextCmd)) return
         val bytes = (nextCmd + "\r\n").toByteArray(Charsets.UTF_8)
 
+        val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+
         var startStatus: Int? = null
         val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            gatt.writeCharacteristic(char, bytes, writeType)
                 .also { startStatus = it } == BluetoothStatusCodes.SUCCESS
         } else {
             char.value = bytes
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            char.writeType = writeType
             gatt.writeCharacteristic(char)
         }
 
