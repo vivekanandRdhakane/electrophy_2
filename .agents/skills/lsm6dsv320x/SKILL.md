@@ -156,6 +156,10 @@ Operating modes include:
 
 ODR selection includes 1.875 Hz, 7.5 Hz, 15 Hz, 30 Hz, 60 Hz, 120 Hz, 240 Hz, 480 Hz, 960 Hz, 1.92 kHz, 3.84 kHz, and 7.68 kHz, depending on operating mode.
 
+> [!IMPORTANT]
+> **Operating Mode & 1.875 Hz ODR Restriction:**
+> `lsm6dsv320x_xl_setup(&dev_ctx, LSM6DSV320X_ODR_AT_1Hz875, ...)` returns non-zero (`-1`) if the accelerometer is currently in High-Performance mode (`LSM6DSV320X_XL_HIGH_PERFORMANCE_MD`) because 1.875 Hz is only supported in low-power modes. Always verify return codes from ST driver functions (returns `0` on success, non-zero on failure) and do not mutate configuration state or claim success if the driver rejects an incompatible mode combination.
+
 ### `CTRL8` (`0x17`)
 
 `FS_XL[1:0]` selects low-g full scale:

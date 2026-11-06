@@ -9,46 +9,69 @@ description: >-
 # ESP-IDF Build and Development on Windows
 
 ## Overview
-This environment has ESP-IDF v5.3.1 installed. The Python virtual environment is Python 3.11 located at `C:\Users\user\.espressif\python_env\idf5.3_py3.11_env`.
+This environment has **ESP-IDF v6.1** installed at `C:\esp\v6.1\esp-idf`.
+The Espressif tools and Python 3.11 virtual environment are located at `C:\Espressif\tools`.
 
-Because `export.ps1` defaults to searching for Python 3.12 (`idf5.3_py3.12_env`), `$env:IDF_PYTHON_ENV_PATH` **must** be explicitly set to the Python 3.11 environment path before invoking `export.ps1`.
+To activate the complete ESP-IDF environment in any PowerShell session, dot-source the profile script:
+```powershell
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"
+```
+This automatically sets `IDF_PATH`, `IDF_TOOLS_PATH`, `IDF_PYTHON_ENV_PATH`, and puts `idf.py`, `ninja`, `cmake`, and `esptool.py` into `PATH`.
 
 ## Key Paths
-- **ESP-IDF Root**: `C:\Users\user\esp\v5.3.1\esp-idf`
-- **Export Script**: `C:\Users\user\esp\v5.3.1\esp-idf\export.ps1`
-- **Python Virtualenv**: `C:\Users\user\.espressif\python_env\idf5.3_py3.11_env`
-- **Espressif Tools**: `C:\Users\user\.espressif\tools`
+- **ESP-IDF Root**: `C:\esp\v6.1\esp-idf`
+- **Activation Script**: `C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`
+- **Python Virtualenv**: `C:\Espressif\tools\python\v6.1\venv`
+- **Espressif Tools**: `C:\Espressif\tools`
+
+## Device Ports (COM Ports)
+The Electrophy setup typically connects two ESP32-C3 modules over USB: `COM3` and `COM5`.
+To list currently connected serial ports in PowerShell:
+```powershell
+[System.IO.Ports.SerialPort]::GetPortNames()
+```
+If a port is not listed, the board may be unplugged, powered off, or held in reset.
 
 ## Standard PowerShell Commands
 
+Always run from the project firmware directory (e.g. `electrophy_2/esp_sensor`):
+
 ### 1. Build Project
-Always run from the project directory (e.g. where `CMakeLists.txt` is located):
 ```powershell
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py build
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py build
 ```
 
 ### 2. Flash to Target Device
 ```powershell
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py -p <PORT> flash
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py -p COM3 flash
 ```
-*(Replace `<PORT>` with the target serial port, e.g. `COM3`)*
+*(Or specify `COM5` or another port detected via `GetPortNames()`)*
 
 ### 3. Monitor Serial Output
 ```powershell
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py -p <PORT> monitor
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py -p COM3 monitor
 ```
+*(Press `Ctrl+]` to exit the monitor)*
 
 ### 4. Build, Flash, and Monitor
 ```powershell
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py -p <PORT> flash monitor
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py -p COM3 flash monitor
 ```
 
 ### 5. Clean / Target Configuration
 ```powershell
 # Clean build artifacts
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py fullclean
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py fullclean
 
 # Set target chip (e.g., esp32c3)
-$env:IDF_PYTHON_ENV_PATH = "C:\Users\user\.espressif\python_env\idf5.3_py3.11_env"; . "C:\Users\user\esp\v5.3.1\esp-idf\export.ps1"; idf.py set-target esp32c3
+. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; idf.py set-target esp32c3
 ```
 
+## Important Notes & Troubleshooting
+1. **Port Busy (`FileNotFoundError` or permission denied)**:
+   - Ensure any running `idf.py monitor` or serial terminal sessions on that COM port are closed (`Ctrl+]`).
+   - If flashing fails with "Could not open port", verify the port is plugged in using `[System.IO.Ports.SerialPort]::GetPortNames()`.
+2. **VS Code Settings**:
+   - `esp_sensor/.vscode/settings.json` contains `"idf.port": "COM3"`. Keep user modifications to this file intact (do not overwrite with git commits).
+3. **Single-Core Watchdog Consideration**:
+   - ESP32-C3 is a single-core RISC-V MCU. At high ODR streaming (up to 7.68 kHz), sensor reading tasks must feed the Task Watchdog Timer (`esp_task_wdt_reset()`) to prevent TWDT timeouts.

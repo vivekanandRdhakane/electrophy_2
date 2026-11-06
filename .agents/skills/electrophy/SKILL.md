@@ -18,7 +18,7 @@ telemetry system with three major components:
 
 1. **Custom PCB** (`PCB_Project/electrophy_2/`) — KiCad 4-layer board with ESP32-C3FN4,
    LSM6DSV320X IMU, battery charging, USB-C, and 2.4 GHz antenna.
-2. **ESP32-C3 Firmware** (`esp_sensor/`) — ESP-IDF v5.3.1 firmware that reads the
+2. **ESP32-C3 Firmware** (`esp_sensor/`) — ESP-IDF v6.1 firmware that reads the
    IMU over 8 MHz SPI, packs data into 12-bit binary frames, and streams via BLE.
 3. **Android App** (`Electrophy_app/`) — Kotlin/Jetpack Compose app that receives
    the BLE stream, calibrates, filters, visualizes with real-time charts and a
@@ -138,7 +138,8 @@ electrophy_2/
 
 ### 4.1 Build Environment
 
-- **ESP-IDF v5.3.1**, Python 3.11 virtual environment
+- **ESP-IDF v6.1** at `C:\esp\v6.1\esp-idf`, Python 3.11 virtual environment at `C:\Espressif\tools\python\v6.1\venv`
+- **Activation script**: `. "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"`
 - **Target chip**: esp32c3
 - See the `esp-idf` skill for build/flash/monitor commands
 
@@ -146,12 +147,13 @@ electrophy_2/
 
 Single source file `main/main.c` containing:
 
-- **SPI driver**: `platform_write()` / `platform_read()` with `spi_mutex` serialization
-- **Sensor task** (`sensor_task`, priority 5): polls INT1, reads sensor data, batches and sends
-- **NimBLE BLE host**: Nordic UART Service (NUS), command handler, notification TX
+- **SPI driver**: `platform_write()` / `platform_read()` with recursive mutex (`spi_mutex`), strict bounds checking, timeout handling, and CS pin management
+- **Sensor task** (`sensor_task`, priority 5): polls INT1, reads sensor data, batches and sends, feeds TWDT
+- **NimBLE BLE host**: Nordic UART Service (NUS), command handler with ST driver return validation, notification TX
 - **12-bit packing engine**: `imu_accumulate_sample()` / `imu_flush_batch()`
 - **Dynamic INT routing**: `update_int_routing()` — configures INT1_CTRL and CTRL7 for active sensors
 - **Dynamic timing**: `odr_recompute_timing()` — adjusts task wait timeout to 5× slowest sensor period
+- **Fault Recovery**: `imu_attempt_bus_recovery()` — auto-recovers SPI bus on repeated read failures
 
 ### 4.3 Sensor Configuration Defaults
 
@@ -187,6 +189,37 @@ Flush triggers:
 - Tracked via `BLE_GAP_EVENT_NOTIFY_TX` callback
 - Samples dropped cleanly under backpressure (no crash/hang)
 - Task watchdog reconfigured to avoid panics at high ODR (up to 7.68 kHz)
+
+### 4.7 Robust Error Handling & Bus Recovery (Task E008)
+
+The firmware enforces end-to-end SPI transport safety and hardware fault recovery:
+- **SPI Serialization & Safety (`platform_write`, `platform_read`)**:
+  * Mutex timeout bounded to 100 ms (`ESP_ERR_TIMEOUT`).
+  * Transaction length bounded to 64 bytes (`ESP_ERR_INVALID_SIZE`).
+  * Chip-Select (CS, GPIO5) is asserted low before transaction and unconditionally deasserted high on every exit path.
+  * `spi_mutex` is released unconditionally on all exit paths.
+  * Destination buffers are explicitly zeroed (`memset(bufp, 0, len)`) on any read error so callers never process uninitialized stack/heap memory.
+  * Underlying `esp_err_t` return codes are propagated directly to the ST driver rather than returning false success (`0`).
+- **Sensor Initialization Gate**:
+  * WHO_AM_I (`lsm6dsv320x_device_id_get`) runs a 5-retry loop with 10 ms backoff.
+  * Return codes of all initialization calls (`lsm6dsv320x_init_set`, `lsm6dsv320x_reset_set`, `lsm6dsv320x_xl_setup`, `lsm6dsv320x_gy_setup`, etc.) are checked.
+  * If initialization fails, `sensor_ready` is strictly held `false`, fault state (`s_sensor_fault`) is set, and the sensor task enters a safe low-power idle loop feeding the watchdog rather than claiming readiness.
+- **Runtime Error Recovery**:
+  * Tracks consecutive SPI read errors (`s_consecutive_read_errors`).
+  * When 10 consecutive read errors occur, `imu_attempt_bus_recovery()` triggers (rate-limited to 250 ms), resets CS high, verifies `WHO_AM_I` (`0x73`), resets error counts, and logs recovery diagnostics.
+- **BLE Command Validation**:
+  * ODR and full-scale range commands capture driver return codes. Incompatible settings (such as 1.875 Hz in high-performance mode) are rejected, leaving state unchanged and returning `BLE_ATT_ERR_UNLIKELY` to the central.
+
+### 4.8 Dual Device Flashing & Port Management
+
+The project setup typically connects two hardware sensor boards over USB: `COM3` and `COM5`.
+- **Port Discovery**: `[System.IO.Ports.SerialPort]::GetPortNames()` in PowerShell.
+- **Flashing Target Port**:
+  ```powershell
+  . "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; cd esp_sensor; idf.py -p COM3 flash
+  . "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"; cd esp_sensor; idf.py -p COM5 flash
+  ```
+- **VS Code Settings**: `esp_sensor/.vscode/settings.json` stores `"idf.port": "COM3"`. Keep this file untracked/uncommitted when switching local developer ports.
 
 ---
 
@@ -400,6 +433,19 @@ Custom software 3D rendering engine on Compose Canvas:
 Hardware features required: `bluetooth`, `bluetooth_le`
 
 FileProvider configured for CSV log file sharing.
+
+### 6.9 Unit Testing
+
+The Android codebase has a suite of unit tests verifying mathematical, signal processing, and protocol components.
+Run the complete test suite from PowerShell:
+```powershell
+cd Electrophy_app
+./gradlew.bat testDebugUnitTest
+```
+Key test suites:
+- `ComparatorTest.kt` — 8 tests verifying cross-correlation, lag detection, phase estimation, anti-phase polarity preservation, periodicity ambiguity resolution, and constant signal safety (Task E006).
+- `MathEngineTest.kt` — Numerical integration, derivative, FFT, and filter tests.
+- `BitReaderTest.kt` — Protocol decoding and 12-bit signed packing tests.
 
 ---
 
