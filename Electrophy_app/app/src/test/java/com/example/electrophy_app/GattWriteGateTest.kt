@@ -55,4 +55,57 @@ class GattWriteGateTest {
         assertFalse(second.failed)
         assertTrue(second.complete(GattWriteGate.Kind.COMMAND, true))
     }
+
+    @Test fun refusedStartWaitsBeforeRetryAndDoesNotReleaseLaterCommands() {
+        val gate = GattWriteGate()
+        gate.begin(GattWriteGate.Kind.COMMAND, "pause")
+        assertTrue(gate.retryRefusedCommand())
+        assertFalse(gate.failed)
+        assertFalse(gate.begin(GattWriteGate.Kind.COMMAND, "resume"))
+        assertFalse(gate.complete(GattWriteGate.Kind.COMMAND, true))
+        assertFalse(gate.timeout()) // No write was accepted, so no callback is due.
+        assertTrue(gate.retryReady())
+        assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "pause"))
+        assertTrue(gate.complete(GattWriteGate.Kind.COMMAND, true))
+        assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "resume"))
+    }
+
+    @Test fun repeatedBusyStartsHaveABoundedRetryBudget() {
+        val gate = GattWriteGate()
+        repeat(3) {
+            assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "pause"))
+            assertTrue(gate.retryRefusedCommand())
+            assertTrue(gate.retryReady())
+        }
+        assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "pause"))
+        assertFalse(gate.retryRefusedCommand())
+        assertTrue(gate.complete(GattWriteGate.Kind.COMMAND, false))
+        assertFalse(gate.retryReady())
+        assertFalse(gate.begin(GattWriteGate.Kind.COMMAND, "resume"))
+    }
+
+    @Test fun successfulWriteRestoresRetryBudgetForTheNextCommand() {
+        val gate = GattWriteGate()
+        repeat(2) {
+            repeat(3) {
+                assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "pause"))
+                assertTrue(gate.retryRefusedCommand())
+                assertTrue(gate.retryReady())
+            }
+            assertTrue(gate.begin(GattWriteGate.Kind.COMMAND, "pause"))
+            assertTrue(gate.complete(GattWriteGate.Kind.COMMAND, true))
+        }
+    }
+
+    @Test fun reconnectClearsPendingRetryWithoutAffectingTheOtherDevice() {
+        val first = GattWriteGate()
+        val second = GattWriteGate()
+        first.begin(GattWriteGate.Kind.COMMAND, "pause")
+        second.begin(GattWriteGate.Kind.COMMAND, "pause")
+        first.retryRefusedCommand()
+        first.reset()
+        assertFalse(first.retryReady())
+        assertTrue(first.begin(GattWriteGate.Kind.SUBSCRIPTION, "CCCD"))
+        assertEquals(GattWriteGate.Kind.COMMAND, second.pending)
+    }
 }

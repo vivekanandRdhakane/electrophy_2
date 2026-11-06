@@ -15,6 +15,8 @@ internal fun collisionSignedPlanarG(point: AxisPoint, zero: PlanarZero, alongX: 
     return if (along >= 0f) magnitude else -magnitude
 }
 internal enum class PairPhase { IDLE, BASELINE, ARMED, CAPTURING, COMPLETE, INTERRUPTED }
+/** An interrupted capture freezes locally; only a completed capture stops sensor streaming. */
+internal fun shouldPauseSensorsForPairPhase(phase: PairPhase) = phase == PairPhase.COMPLETE
 internal data class PairSettings(
     val alongX: Boolean = true, val condition: String = "Deviation",
     val thresholdG: Float = 5f, val preNs: Long = 1_500_000_000,
@@ -34,7 +36,8 @@ internal data class PairRunState(
     val phase: PairPhase = PairPhase.IDLE,
     val message: String = "Start a new run with both strikers still.",
     val firstZero: PlanarZero = PlanarZero(), val secondZero: PlanarZero = PlanarZero(),
-    val completed: CollisionPair? = null, val runId: Long = 0
+    val completed: CollisionPair? = null, val runId: Long = 0,
+    val interruptedPoints: Pair<List<AxisPoint>, List<AxisPoint>>? = null
 )
 
 /** Owns one paired run. Device clocks are never compared with each other. */
@@ -74,15 +77,17 @@ internal class PairedCollisionController {
                 else "Enter a positive finite threshold and capture duration.",
             firstZero = if (next.collectBaseline) PlanarZero() else next.firstZero,
             secondZero = if (next.collectBaseline) PlanarZero() else next.secondZero,
-            runId = mutable.value.runId + 1)
+            runId = mutable.value.runId + 1, interruptedPoints = null)
     }
 
     @Synchronized fun interrupt(reason: String) {
         if (!running()) return // Completed pairs are immutable and survive later failures.
+        val interruptedPoints = streams[0].buffer.toList() to streams[1].buffer.toList()
         streams.forEach { it.triggerNs = null; it.triggerArrival = null; it.frozen = null }
         externalCrossings.fill(null)
         pauseScheduled = false
-        mutable.value = mutable.value.copy(phase = PairPhase.INTERRUPTED, message = "$reason Start a new run.")
+        mutable.value = mutable.value.copy(phase = PairPhase.INTERRUPTED,
+            message = "$reason Start a new run.", interruptedPoints = interruptedPoints)
     }
 
     @Synchronized fun clearLive() {
@@ -91,7 +96,8 @@ internal class PairedCollisionController {
         streams.indices.forEach { streams[it] = Stream() }
         mutable.value = mutable.value.copy(phase = PairPhase.IDLE,
             message = "Live history cleared. Start a new run with both strikers still.",
-            firstZero = PlanarZero(), secondZero = PlanarZero(), runId = mutable.value.runId + 1)
+            firstZero = PlanarZero(), secondZero = PlanarZero(), runId = mutable.value.runId + 1,
+            interruptedPoints = null)
     }
 
     /** Original threshold callbacks: no baseline/prehistory gate before scheduling Pause. */
@@ -131,25 +137,41 @@ internal class PairedCollisionController {
                 settings.firstName, settings.secondName, pre, post))
     }
 
-    /** Startup configuration may create several segments before either device is armed. */
-    @Synchronized fun streamChanged(device: Int, reason: String) {
-        if (mutable.value.phase == PairPhase.BASELINE) {
-            streams[device] = Stream(previousEpoch = streams[device].epoch ?: streams[device].previousEpoch,
-                zero = if (settings.collectBaseline) null else if (device == 0) settings.firstZero else settings.secondZero)
-        } else interrupt(reason)
+    /** A sensor segment restart discards its old history but leaves the live run active. */
+    @Synchronized fun streamChanged(device: Int, reason: String, nowMs: Long) {
+        if (!running()) return
+        restartHistory(device, streams[device].epoch ?: streams[device].previousEpoch, nowMs, reason)
+    }
+
+    private fun restartHistory(device: Int, previousEpoch: Pair<Long, Long>?, nowMs: Long, reason: String) {
+        streams[device] = Stream(previousEpoch = previousEpoch,
+            zero = if (settings.collectBaseline) null else if (device == 0) settings.firstZero else settings.secondZero)
+        streams.forEach { it.triggerNs = null; it.triggerArrival = null; it.frozen = null }
+        externalCrossings.fill(null)
+        pauseScheduled = false
+        startedMs = nowMs
+        mutable.value = mutable.value.copy(phase = PairPhase.BASELINE,
+            message = "$reason Collecting fresh history.")
     }
 
     @Synchronized fun tick(nowMs: Long) {
         if (!running()) return
-        val waiting = streams.any { nowMs - (it.lastArrival.takeIf { t -> t > 0 } ?: startedMs) > 3000 }
-        if (waiting) { interrupt("A device stopped delivering samples."); return }
+        streams.indices.forEach { device ->
+            val last = streams[device].lastArrival.takeIf { it > 0 } ?: startedMs
+            if (nowMs - last > 3000) {
+                restartHistory(device, null, nowMs, "Device ${device + 1} is waiting for fresh samples.")
+            }
+        }
         val unmatched = externalCrossings.filterNotNull().minOrNull()
         if (!pauseScheduled && unmatched != null && nowMs - unmatched > 3000) {
             externalCrossings.fill(null) // Expired crossing cannot pair with a later collision.
         }
         val firstCrossing = streams.mapNotNull { it.triggerArrival }.minOrNull()
-        if (firstCrossing != null && streams.any { it.triggerNs == null } && nowMs - firstCrossing > 3000)
-            interrupt("The second device did not detect the event in time.")
+        if (firstCrossing != null && streams.any { it.triggerNs == null } && nowMs - firstCrossing > 3000) {
+            streams.forEach { it.triggerNs = null; it.triggerArrival = null; it.frozen = null }
+            mutable.value = mutable.value.copy(phase = PairPhase.ARMED,
+                message = "Waiting for the next event on both devices.")
+        }
     }
 
     @Synchronized fun accept(device: Int, batch: List<AxisPoint>, nowMs: Long) {
@@ -174,12 +196,15 @@ internal class PairedCollisionController {
                 if (advance == 0L || advance >= 0x8000_0000L) continue // old queued segments
             }
             if (s.epoch != null && s.epoch != epoch) {
-                streamChanged(device, "Device ${device + 1} changed its data segment.")
+                streamChanged(device, "Device ${device + 1} changed its data segment.", nowMs)
                 if (!running()) return
                 s = streams[device]
             }
-            if (s.lastIndex != null && (index != ((s.lastIndex!! + 1) and 0xffff_ffffL) || ns <= s.lastNs!!)) {
-                interrupt("Device ${device + 1} has missing or reordered samples."); return
+            if (s.lastIndex != null) {
+                val advance = (index - s.lastIndex!!) and 0xffff_ffffL
+                if (advance == 0L || advance >= 0x8000_0000L || ns <= s.lastNs!!) {
+                    interrupt("Device ${device + 1} has reordered samples."); return
+                }
             }
             s.epoch = epoch; s.lastIndex = index; s.lastNs = ns; s.lastArrival = nowMs
             s.buffer.addLast(p)

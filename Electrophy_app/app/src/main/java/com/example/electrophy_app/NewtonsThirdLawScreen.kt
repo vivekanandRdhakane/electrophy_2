@@ -1,6 +1,7 @@
 package com.example.electrophy_app
 
 import android.os.SystemClock
+import android.util.Log
 import android.view.ViewGroup
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -46,6 +47,8 @@ fun NewtonsThirdLawScreen(
 ) {
     val firstState by first.connectionState.collectAsState()
     val secondState by second.connectionState.collectAsState()
+    val firstConfiguring by first.isConfiguring.collectAsState()
+    val secondConfiguring by second.isConfiguring.collectAsState()
     val firstConnectionError by first.connectionError.collectAsState()
     val secondConnectionError by second.connectionError.collectAsState()
     val firstName by first.connectedDeviceName.collectAsState()
@@ -82,6 +85,7 @@ fun NewtonsThirdLawScreen(
     val postImpactMs = frozen?.postNs?.div(1_000_000) ?: triggerDelayMs
     val zeroed = hasManualZero
     val bothConnected = firstState == ConnectionState.Connected && secondState == ConnectionState.Connected
+    val bothReady = bothConnected && !firstConfiguring && !secondConfiguring
     val running = run.phase in setOf(PairPhase.BASELINE, PairPhase.ARMED, PairPhase.CAPTURING)
     val windowMs = timeWindowSec * 1000f
 
@@ -102,9 +106,13 @@ fun NewtonsThirdLawScreen(
     }
 
     fun startRun(forceFreshSegment: Boolean = true) {
-        if (!bothConnected) return
+        // Read current values as setup may have started since this composition.
+        if (!bothReady || first.isConfiguring.value || second.isConfiguring.value) return
         autoStartPending = false
-        val previousEpochs = if (forceFreshSegment) listOf(first.latestAcquisitionEpoch, second.latestAcquisitionEpoch)
+        // An interrupted run has left both sensors streaming. Restart the
+        // capture from incoming samples without a pause/resume BLE round trip.
+        val restartStreaming = forceFreshSegment && (first.isPaused.value || second.isPaused.value)
+        val previousEpochs = if (restartStreaming) listOf(first.latestAcquisitionEpoch, second.latestAcquisitionEpoch)
             else listOf(null, null)
         pair.interrupt("Starting a fresh run.")
         first.cancelPendingCaptureTrigger()
@@ -112,7 +120,7 @@ fun NewtonsThirdLawScreen(
         showPrevious = false
         cursorEnabled = false
         if (timeWindowSec < 1f) setTimeWindow(3f)
-        if (forceFreshSegment) {
+        if (restartStreaming) {
             first.setCapturePaused(true)
             second.setCapturePaused(true)
         }
@@ -154,8 +162,8 @@ fun NewtonsThirdLawScreen(
         second.onThresholdCrossed = { thresholdCrossed(1) }
         first.onPairedStreamInterrupted = { pair.interrupt("Device 1: $it") }
         second.onPairedStreamInterrupted = { pair.interrupt("Device 2: $it") }
-        first.onPairedSegmentChanged = { pair.streamChanged(0, "Device 1 changed its data segment.") }
-        second.onPairedSegmentChanged = { pair.streamChanged(1, "Device 2 changed its data segment.") }
+        first.onPairedSegmentChanged = { pair.streamChanged(0, "Device 1 changed its data segment.", SystemClock.elapsedRealtime()) }
+        second.onPairedSegmentChanged = { pair.streamChanged(1, "Device 2 changed its data segment.", SystemClock.elapsedRealtime()) }
         first.onPairedHighGBatch = { pair.accept(0, it, SystemClock.elapsedRealtime()) }
         second.onPairedHighGBatch = { pair.accept(1, it, SystemClock.elapsedRealtime()) }
         onDispose {
@@ -188,17 +196,22 @@ fun NewtonsThirdLawScreen(
     }
     val firstHasTimedHighG = firstData.highG.lastOrNull()?.acquisitionTimeNs != null
     val secondHasTimedHighG = secondData.highG.lastOrNull()?.acquisitionTimeNs != null
-    LaunchedEffect(bothConnected, firstHasTimedHighG, secondHasTimedHighG, autoStartPending) {
-        if (autoStartPending && bothConnected && firstHasTimedHighG && secondHasTimedHighG &&
+    LaunchedEffect(bothReady, firstHasTimedHighG, secondHasTimedHighG, autoStartPending) {
+        if (autoStartPending && bothReady && firstHasTimedHighG && secondHasTimedHighG &&
             pair.state.value.phase == PairPhase.IDLE) startRun(forceFreshSegment = false)
     }
     LaunchedEffect(run.phase, run.runId) {
         if (pair.state.value.runId != run.runId || pair.state.value.phase != run.phase) return@LaunchedEffect
+        if (run.phase == PairPhase.INTERRUPTED) {
+            Log.w("ElectrophyBLE", "Paired capture interrupted run=${run.runId}: ${run.message}")
+        }
         if (run.phase == PairPhase.COMPLETE || run.phase == PairPhase.INTERRUPTED) {
             first.cancelPendingCaptureTrigger()
             second.cancelPendingCaptureTrigger()
-            first.setCapturePaused(true)
-            second.setCapturePaused(true)
+            if (shouldPauseSensorsForPairPhase(run.phase)) {
+                first.setCapturePaused(true)
+                second.setCapturePaused(true)
+            }
             cursorEnabled = false
             if (run.phase == PairPhase.COMPLETE) setTimeWindow(0.010f)
             if (run.phase == PairPhase.INTERRUPTED) showPrevious = false
@@ -246,7 +259,7 @@ fun NewtonsThirdLawScreen(
                             first.setCapturePaused(true)
                             second.setCapturePaused(true)
                         } else startRun()
-                    }, enabled = bothConnected || running, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                    }, enabled = bothReady || running, contentPadding = PaddingValues(horizontal = 4.dp)) {
                         Text(if (running) "Pause" else "Resume")
                     }
                     TextButton(onClick = {
@@ -283,8 +296,10 @@ fun NewtonsThirdLawScreen(
                     }
                 }
                 CollisionChart(
-                    firstPoints = frozen?.first?.points ?: if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
-                    secondPoints = frozen?.second?.points ?: if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
+                    firstPoints = frozen?.first?.points ?: run.interruptedPoints?.first
+                        ?: if (firstState == ConnectionState.Connected) firstData.highG else emptyList(),
+                    secondPoints = frozen?.second?.points ?: run.interruptedPoints?.second
+                        ?: if (secondState == ConnectionState.Connected) secondData.highG else emptyList(),
                     firstZero = firstZero,
                     secondZero = secondZero,
                     collisionAlongX = frozen?.alongX ?: collisionAlongX,
@@ -331,13 +346,17 @@ fun NewtonsThirdLawScreen(
                     NewtonCollapsibleCard("Sensor Sampling Rate and Range", "High-G · ${highGOdrOptions.find { it.suffix == highGOdr }?.label ?: highGOdr} · ${highGRangeOptions.find { it.suffix == highGRange }?.label ?: highGRange}",
                         samplingExpanded, { samplingExpanded = !samplingExpanded }) {
                             Text("High-G Accel", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            Text("Missing samples are counted in diagnostics while the live plot continues.",
+                                style = MaterialTheme.typography.bodySmall)
                             CompactOdrDropdown("High-G", highGOdrOptions.filter { it.suffix != "off" }, highGOdr, true) {
-                                first.setHighGOdr(it)
-                                second.setHighGOdr(it)
+                                // Re-selecting the current rate must not restart the
+                                // firmware's timing segment and interrupt this run.
+                                if (first.highGOdr.value != it) first.setHighGOdr(it)
+                                if (second.highGOdr.value != it) second.setHighGOdr(it)
                             }
                             CompactRangeDropdown("High-G", highGRangeOptions, highGRange, true) {
-                                first.setHighGRange(it)
-                                second.setHighGRange(it)
+                                if (first.highGRange.value != it) first.setHighGRange(it)
+                                if (second.highGRange.value != it) second.setHighGRange(it)
                             }
                     }
                     NewtonCollapsibleCard("Auto-Trigger / Spike Capture", if (triggerEnabled) "$triggerCondition · ${triggerThreshold.toInt()} g · $postImpactMs ms post-impact" else "Disabled",
@@ -459,8 +478,8 @@ private fun CollisionChart(
     val effectiveTimeWindowMs = animatedWindowMs.value  // drives recomposition every animation frame
     val defaultEnd = if (peaksAligned) effectiveTimeWindowMs / 2f else 0f
     val bounds = listOfNotNull(
-        firstAnchor?.let { anchor -> firstPoints.first().time - anchor to firstPoints.last().time - anchor },
-        secondAnchor?.let { anchor -> secondPoints.first().time - anchor to secondPoints.last().time - anchor }
+        collisionTimeBounds(firstPoints, firstAnchor),
+        collisionTimeBounds(secondPoints, secondAnchor)
     )
     val earliestShared = bounds.maxOfOrNull { it.first } ?: 0f
     val latestShared = bounds.minOfOrNull { it.second } ?: 0f

@@ -56,15 +56,38 @@ class PairedCollisionControllerTest {
         assertTrue(c.state.value.message.contains("disconnected"))
     }
 
-    @Test fun missingSamplesAndSegmentChangesInvalidateBothSides() {
-        for (segment in listOf(false, true)) {
-            val c = armed()
-            c.accept(0, points(0, 200, 40, 210), 1300)
-            c.accept(1, points(1, if (segment) 200 else 201, 40, 215,
-                segment = if (segment) 2 else 1), 1400)
-            assertEquals(PairPhase.INTERRUPTED, c.state.value.phase)
-            assertNull(c.state.value.completed)
-        }
+    @Test fun connectionFailureFreezesThePlotWithoutRequiringSensorPause() {
+        val c = armed()
+        val before = c.state.value.runId
+        c.interrupt("Connection failed.")
+        val frozen = c.state.value.interruptedPoints!!
+        assertEquals(200, frozen.first.size)
+        assertEquals(200, frozen.second.size)
+        assertFalse(shouldPauseSensorsForPairPhase(c.state.value.phase))
+        c.accept(0, points(0, 200, 40), 1300)
+        assertEquals(frozen, c.state.value.interruptedPoints)
+        c.start(settings, 1400)
+        assertEquals(before + 1, c.state.value.runId)
+        assertNull(c.state.value.interruptedPoints)
+        assertTrue(shouldPauseSensorsForPairPhase(PairPhase.COMPLETE))
+    }
+
+    @Test fun missingSamplesDoNotStopTheLivePair() {
+        val c = armed()
+        c.accept(0, points(0, 200, 40, 210), 1300)
+        c.accept(1, points(1, 201, 40, 215), 1400)
+        assertEquals(PairPhase.COMPLETE, c.state.value.phase)
+        assertEquals(215L, c.state.value.completed!!.second.points.first { it.x < -5f }.sampleIndex)
+    }
+
+    @Test fun segmentRestartRearmsWithoutStoppingThePlot() {
+        val c = armed()
+        c.accept(0, points(0, 200, 40, 210), 1300)
+        c.accept(1, points(1, 0, 40, segment = 2), 1400)
+        assertEquals(PairPhase.BASELINE, c.state.value.phase)
+        assertNull(c.state.value.completed)
+        c.accept(1, points(1, 40, 200, segment = 2), 1500)
+        assertEquals(PairPhase.ARMED, c.state.value.phase)
     }
 
     @Test fun freshRunClearsOldEventSelectionsAndBaselines() {
@@ -94,17 +117,20 @@ class PairedCollisionControllerTest {
         assertEquals(PairPhase.INTERRUPTED, c.state.value.phase)
     }
 
-    @Test fun staleStreamAndUnmatchedEventExpireThePair() {
+    @Test fun staleStreamAndUnmatchedEventKeepThePairRunning() {
         val stale = armed()
         stale.tick(4201)
-        assertEquals(PairPhase.INTERRUPTED, stale.state.value.phase)
+        assertEquals(PairPhase.BASELINE, stale.state.value.phase)
+        stale.accept(0, points(0, 200, 200), 4300)
+        stale.accept(1, points(1, 200, 200), 4300)
+        assertEquals(PairPhase.ARMED, stale.state.value.phase)
         val unmatched = armed()
         unmatched.accept(0, points(0, 200, 40, 210), 1300)
         unmatched.accept(0, points(0, 240, 10), 4000)
         unmatched.accept(1, points(1, 200, 10), 4000)
         unmatched.tick(4301)
-        assertEquals(PairPhase.INTERRUPTED, unmatched.state.value.phase)
-        assertTrue(unmatched.state.value.message.contains("second device"))
+        assertEquals(PairPhase.ARMED, unmatched.state.value.phase)
+        assertNull(unmatched.state.value.completed)
     }
 
     @Test fun legacyDataAndMovingBaselineCannotProduceValidPair() {
@@ -123,7 +149,7 @@ class PairedCollisionControllerTest {
         val c = PairedCollisionController()
         c.start(settings, 1000)
         c.accept(0, points(0, 0, 80), 1100)
-        c.streamChanged(0, "Resume segment")
+        c.streamChanged(0, "Resume segment", 1100)
         c.accept(1, points(1, 0, 200), 1200)
         assertEquals(PairPhase.BASELINE, c.state.value.phase)
         c.accept(0, points(0, 0, 200, segment = 2), 1200)
@@ -277,7 +303,7 @@ class PairedCollisionControllerTest {
         val c = PairedCollisionController()
         c.start(settings.copy(triggerEnabled = false, collectBaseline = false), 1000)
         c.accept(0, points(0, 0, 500), 1500)
-        c.streamChanged(0, "Resume")
+        c.streamChanged(0, "Resume", 1500)
         c.accept(1, points(1, 0, 500), 1500)
         assertEquals(PairPhase.BASELINE, c.state.value.phase)
         c.accept(0, points(0, 0, 200, segment = 2), 1600)

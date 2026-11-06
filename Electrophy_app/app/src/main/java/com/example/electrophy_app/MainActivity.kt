@@ -203,6 +203,8 @@ class BleViewModel : ViewModel() {
     }
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
+    private val _isConfiguring = MutableStateFlow(false)
+    val isConfiguring: StateFlow<Boolean> = _isConfiguring
     private val _connectedDevice = MutableStateFlow<String?>(null)
     val connectedDevice: StateFlow<String?> = _connectedDevice
     private val _connectedDeviceName = MutableStateFlow<String?>(null)
@@ -443,7 +445,7 @@ class BleViewModel : ViewModel() {
 
     private fun checkAutoTrigger(points: List<AxisPoint>) {
         val triggerEpoch = triggerGeneration.get()
-        if (!_isAutoTriggerEnabled.value || _isPaused.value || isTriggerPending) return
+        if (!_isAutoTriggerEnabled.value || _isPaused.value || _isConfiguring.value || isTriggerPending) return
         val axis = _autoTriggerAxis.value
         val condition = _autoTriggerCondition.value
         val threshold = _autoTriggerThreshold.value
@@ -871,12 +873,15 @@ class BleViewModel : ViewModel() {
                     )
                     gatt.requestMtu(PREFERRED_BLE_MTU)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    onPairedStreamInterrupted?.invoke("A device disconnected.")
+                    val reason = "Bluetooth disconnected (status=$status). Reconnect the device."
+                    _connectionError.value = reason
+                    onPairedStreamInterrupted?.invoke(reason)
                     invalidatePendingTrigger()
                     _batteryStatus.value = null
                     _connectedDevice.value = null
                     _connectedDeviceName.value = null
                     _connectionState.value = ConnectionState.Disconnected
+                    _isConfiguring.value = false
                     _isPaused.value = false
                     _receivedSamplesPerSecond.value = 0
                     _lastActiveSamplesPerSecond.value = 0
@@ -1074,14 +1079,20 @@ class BleViewModel : ViewModel() {
         latestAcquisitionEpoch = decoded.timing?.let { it.bootId to it.segmentId }
         receiveMeter.record(decoded.sampleCount, decoded.seq)
         lastSamplePacketArrivalMs = SystemClock.elapsedRealtime()
-        if (timedBatch != null && (timedBatch.newSegment || timedBatch.discontinuity)) {
-            if (timedBatch.discontinuity) {
-                if (timedBatch.newSegment && decoded.timing!!.flags and 2 == 0) onPairedSegmentChanged?.invoke()
-                else onPairedStreamInterrupted?.invoke("A device lost sample continuity.")
-            }
+        if (timedBatch?.discontinuity == true) {
+            // Missing notifications can occur at the highest two-device rate.
+            // Preserve the live plot and paired run; device timestamps still show
+            // the gap. A new segment resets only that device's timing history.
+            Log.w(BLE_TAG, "Sample continuity gap device=${_connectedDevice.value} " +
+                "gapSamples=${timedBatch.gapSamples} newSegment=${timedBatch.newSegment} " +
+                "segment=${decoded.timing?.segmentId} flags=${decoded.timing?.flags} " +
+                "firstSample=${decoded.timing?.firstSample} seq=${decoded.seq}")
+        }
+        if (timedBatch?.newSegment == true && timedBatch.discontinuity) {
+            onPairedSegmentChanged?.invoke()
             invalidatePendingTrigger()
-            // Until E011/E012 support intervals across gaps, never connect or
-            // analyze the old and new intervals as one continuous record.
+            // A new segment has a new plot-time origin. Restart only this
+            // device's chart instead of mixing unrelated time coordinates.
             lowGBuffer.clear(); highGBuffer.clear(); gyroBuffer.clear()
             _chartData.value = ChartData()
             resetFilterState(); lastAttitudeCalcTimeMs = 0L
@@ -1439,6 +1450,7 @@ class BleViewModel : ViewModel() {
         rxCharacteristic = null
         _batteryStatus.value = null
         _connectionState.value = ConnectionState.Disconnected
+        _isConfiguring.value = false
         _receivedSamplesPerSecond.value = 0
         _lastActiveSamplesPerSecond.value = 0
         _firmwareDiagnostics.value = null
@@ -1514,8 +1526,10 @@ class BleViewModel : ViewModel() {
      */
     fun syncFullConfigurationToDevice() {
         if (_connectionState.value != ConnectionState.Connected) return
+        _isConfiguring.value = true
+        // Keep notifications quiet while applying several sensor/timing changes.
+        sendCommand("pause")
         sendCommand("proto2")
-        sendCommand(if (_isPaused.value) "pause" else "resume")
         sendCommand("range_low_g_${_lowGRange.value}")
         sendCommand("range_high_g_${_highGRange.value}")
         sendCommand("range_gyro_${_gyroRange.value}")
@@ -1524,6 +1538,7 @@ class BleViewModel : ViewModel() {
         sendCommand("odr_gyro_${_gyroOdr.value}")
         sendCommand(_selectedMode.value.command)
         if (_diagnosticsEnabled.value) sendCommand("diag_on")
+        if (!_isPaused.value) sendCommand("resume")
     }
 
     private fun processIncomingLine(rawLine: String): Boolean {
@@ -1632,13 +1647,13 @@ class BleViewModel : ViewModel() {
     }
 
     fun applyExperimentMode(mode: ExperimentMode) {
-        // Unpause if a previous experiment's auto-trigger had paused the sensor
-        if (_isPaused.value) {
-            _isPaused.value = false
-            if (_connectionState.value == ConnectionState.Connected) {
-                sendCommand("resume")
-            }
-        }
+        // Pause on the device before changing its range/rate/mode. In particular,
+        // Newton's law configures two high-rate streams at once. Resume only after
+        // the final configuration write has completed through the command queue.
+        _isConfiguring.value = _connectionState.value == ConnectionState.Connected
+        invalidatePendingTrigger()
+        sendCommand("pause")
+        _isPaused.value = false
 
         // 1. Configure Full-Scale Ranges first
         mode.lowGRange?.let { setLowGRange(it) }
@@ -1675,6 +1690,7 @@ class BleViewModel : ViewModel() {
 
         setTimeWindow(mode.timeWindowSec)
         clearLogs()
+        sendCommand("resume")
     }
 
     fun clearLogs() {
@@ -1734,7 +1750,7 @@ class BleViewModel : ViewModel() {
     }
 
     private fun processNextCommand() {
-        if (gattWrites.pending != null || gattWrites.failed) return
+        if (gattWrites.pending != null || gattWrites.failed || gattWrites.retryPending) return
         if (_connectionState.value != ConnectionState.Connected) {
             commandQueue.clear()
             return
@@ -1747,7 +1763,11 @@ class BleViewModel : ViewModel() {
             commandQueue.clear()
             return
         }
-        val nextCmd = commandQueue.removeFirstOrNull() ?: return
+        // Keep a refused command at the head so later commands cannot overtake it.
+        val nextCmd = commandQueue.firstOrNull() ?: run {
+            _isConfiguring.value = false
+            return
+        }
 
         if (!gattWrites.begin(GattWriteGate.Kind.COMMAND, nextCmd)) return
         val bytes = (nextCmd + "\r\n").toByteArray(Charsets.UTF_8)
@@ -1764,8 +1784,16 @@ class BleViewModel : ViewModel() {
 
         Log.i(BLE_TAG, "BLE command '$nextCmd' (device=${_connectedDevice.value}, started=$started, startStatus=$startStatus, remaining=${commandQueue.size})")
         if (started) {
+            commandQueue.removeFirst()
             mainHandler.removeCallbacks(gattWriteTimeoutRunnable)
             mainHandler.postDelayed(gattWriteTimeoutRunnable, 10_000L)
+        } else if ((startStatus == null || startStatus == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) &&
+            gattWrites.retryRefusedCommand()) {
+            val session = gattSession.current()
+            Log.w(BLE_TAG, "Bluetooth busy; retrying unaccepted command '$nextCmd' device=${gatt.device.address}")
+            mainHandler.postDelayed({
+                if (ownsGatt(gatt, session) && gattWrites.retryReady()) processNextCommand()
+            }, 150L)
         } else {
             gattWrites.complete(GattWriteGate.Kind.COMMAND, false)
             failGattOperation("Android refused Bluetooth command '$nextCmd' (${startStatus ?: "legacy API"}). Reconnect the device.")
